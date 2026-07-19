@@ -6,6 +6,7 @@ from sqlalchemy.orm import sessionmaker
 from app import models
 from app.database import Base
 from app.main import get_study_node_detail, get_subject_study_tree
+from app.pdf_utils import StyledPDFLine
 from app.study_organizer import extract_outline_sections, organize_document
 
 
@@ -62,6 +63,42 @@ P = P1 + P2
         titles = {title for path in paths for title in path}
         self.assertNotIn("1.50 + 2.00 = 3.50", titles)
         self.assertNotIn("P = P1 + P2", titles)
+
+    def test_font_metadata_builds_hierarchy_without_llm(self):
+        styled_lines = [
+            StyledPDFLine("Deep Learning", 1, 24, "Arial-Bold", True, 0, 50),
+            StyledPDFLine("Neural Networks", 1, 18, "Arial-Bold", True, 1, 90),
+            StyledPDFLine(
+                "Layers and Representation",
+                1,
+                14,
+                "Arial-Bold",
+                True,
+                2,
+                130,
+            ),
+            StyledPDFLine(
+                "Information is processed through several layers.",
+                1,
+                11,
+                "Arial",
+                False,
+                3,
+                170,
+            ),
+        ]
+
+        sections = extract_outline_sections(
+            "",
+            "deep-learning.pdf",
+            use_llm=False,
+            styled_lines=styled_lines,
+        )
+
+        self.assertEqual(
+            ["Deep Learning", "Neural Networks", "Layers And Representation"],
+            [node.title for node in sections[0].path],
+        )
 
     def test_extension_pdf_merges_by_numbered_path(self):
         first = self.add_document(

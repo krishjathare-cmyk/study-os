@@ -599,7 +599,9 @@ def upload_document(
         ).all()
     }
     try:
-        organization = organize_document(db=db, document=document)
+        # Upload organization is deliberately local-first. The explicit
+        # false prevents a fallback outline request from spending API credits.
+        organization = organize_document(db=db, document=document, use_llm=False)
         if (
             not organization.chunk_texts
             or len(organization.chunk_texts) != len(organization.subtopic_ids)

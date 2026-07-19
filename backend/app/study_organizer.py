@@ -8,6 +8,7 @@ from sqlalchemy.orm import Session
 from app import models
 from app.chunk_utils import split_text_into_chunks
 from app.llm_provider import infer_study_path
+from app.pdf_utils import StyledPDFLine, extract_styled_pdf_lines
 
 
 NODE_TYPES = {1: "chapter", 2: "topic", 3: "subtopic"}
@@ -92,11 +93,154 @@ def _dedupe_repeated_line(line: str) -> str:
     return line
 
 
-def _prepare_lines(text: str) -> list[str]:
+def _prepare_lines(
+    text: str,
+    styled_lines: list[StyledPDFLine] | None = None,
+) -> tuple[list[str], list[StyledPDFLine | None]]:
+    if styled_lines:
+        prepared = []
+        for styled_line in styled_lines:
+            cleaned = _dedupe_repeated_line(styled_line.text)
+            if cleaned:
+                prepared.append(
+                    StyledPDFLine(
+                        text=cleaned,
+                        page_number=styled_line.page_number,
+                        font_size=styled_line.font_size,
+                        font_name=styled_line.font_name,
+                        is_bold=styled_line.is_bold,
+                        block_number=styled_line.block_number,
+                        y_position=styled_line.y_position,
+                    )
+                )
+
+        lines = []
+        styles = []
+        index = 0
+        while index < len(prepared):
+            current = prepared[index]
+
+            # Some PDFs encode a chapter number, the word CHAPTER, and its
+            # title as separate visual lines. Join them before classification.
+            if (
+                re.fullmatch(r"\d{1,3}", current.text)
+                and index + 2 < len(prepared)
+                and prepared[index + 1].text.strip().lower() == "chapter"
+            ):
+                title_block = prepared[index + 2].block_number
+                title_page = prepared[index + 2].page_number
+                title_parts = []
+                cursor = index + 2
+                while (
+                    cursor < len(prepared)
+                    and prepared[cursor].page_number == title_page
+                    and prepared[cursor].block_number == title_block
+                ):
+                    title_parts.append(prepared[cursor].text)
+                    cursor += 1
+                merged_text = f"Chapter {current.text}: {' '.join(title_parts)}"
+                merged_style = prepared[index + 2]
+                lines.append(merged_text)
+                styles.append(
+                    StyledPDFLine(
+                        text=merged_text,
+                        page_number=merged_style.page_number,
+                        font_size=merged_style.font_size,
+                        font_name=merged_style.font_name,
+                        is_bold=merged_style.is_bold,
+                        block_number=merged_style.block_number,
+                        y_position=merged_style.y_position,
+                    )
+                )
+                index = cursor
+                continue
+
+            # Repeated spans at the same position are common in textbook PDFs.
+            # Keep the longest copy, which usually contains the full word.
+            group = [current]
+            cursor = index + 1
+            while cursor < len(prepared):
+                candidate = prepared[cursor]
+                same_position = (
+                    candidate.page_number == current.page_number
+                    and candidate.block_number == current.block_number
+                    and abs(candidate.y_position - current.y_position) <= 2
+                    and abs(candidate.font_size - current.font_size) <= 0.5
+                )
+                if not same_position:
+                    break
+                group.append(candidate)
+                cursor += 1
+            selected = max(group, key=lambda item: len(item.text))
+            lines.append(selected.text)
+            styles.append(selected)
+            index = cursor
+        return lines, styles
+
     lines = []
     for raw_line in text.replace("\x00", "").splitlines():
         lines.append(_dedupe_repeated_line(raw_line))
-    return lines
+    return lines, [None] * len(lines)
+
+
+def _body_font_size(styled_lines: list[StyledPDFLine]) -> float | None:
+    """Find the dominant font size, weighted by the amount of text."""
+    if not styled_lines:
+        return None
+    buckets: dict[float, int] = {}
+    for line in styled_lines:
+        size = round(line.font_size * 2) / 2
+        buckets[size] = buckets.get(size, 0) + len(line.text)
+    return max(buckets, key=buckets.get)
+
+
+def _style_ratio(style: StyledPDFLine | None, body_font_size: float | None) -> float:
+    if style is None or not body_font_size:
+        return 1.0
+    return style.font_size / body_font_size
+
+
+def _heading_size_levels(
+    styled_lines: list[StyledPDFLine],
+    body_font_size: float | None,
+) -> dict[float, int]:
+    """Rank rare, larger text styles instead of using fixed PDF sizes."""
+    if not body_font_size:
+        return {}
+    candidate_sizes = {
+        round(line.font_size * 2) / 2
+        for line in styled_lines
+        if 2 <= len(line.text.split()) <= 14
+        and sum(character.isalpha() for character in line.text) >= 4
+        and len(line.text) <= 120
+        and not line.text.rstrip().endswith((".", "?", "!", ";"))
+        and (
+            line.is_bold
+            or line.font_size / body_font_size >= 1.15
+        )
+        and line.font_size / body_font_size >= 1.08
+    }
+    return {
+        size: level
+        for level, size in enumerate(sorted(candidate_sizes, reverse=True)[:3], start=1)
+    }
+
+
+def _style_heading_level(
+    style: StyledPDFLine,
+    body_font_size: float | None,
+    has_topic: bool,
+    size_levels: dict[float, int] | None = None,
+) -> int:
+    size = round(style.font_size * 2) / 2
+    if size_levels and size in size_levels:
+        return size_levels[size]
+    ratio = _style_ratio(style, body_font_size)
+    if ratio >= 1.55:
+        return 1
+    if ratio >= 1.25:
+        return 2
+    return 3 if has_topic else 2
 
 
 def _is_page_noise(line: str) -> bool:
@@ -208,8 +352,12 @@ def _chapter_heading(lines: list[str], index: int) -> NodeSpec | None:
     return NodeSpec(title=title, level=1, heading_number=number, confidence=0.95)
 
 
-def _numbered_heading(line: str) -> NodeSpec | None:
-    number_prefix = re.match(r"(\d+(?:\.\d+){1,4})", line.strip())
+def _numbered_heading(
+    line: str,
+    style: StyledPDFLine | None = None,
+    body_font_size: float | None = None,
+) -> NodeSpec | None:
+    number_prefix = re.match(r"(\d+(?:\.\d+){0,4})", line.strip())
     if number_prefix:
         repeated_number = number_prefix.group(1)
         occurrences = re.split(re.escape(repeated_number), line.strip())[1:]
@@ -227,7 +375,7 @@ def _numbered_heading(line: str) -> NodeSpec | None:
                 line = f"{repeated_number} {rebuilt_title}"
 
     match = re.fullmatch(
-        r"(\d+(?:\.\d+){1,4})\s*[:.\-–)]?\s+(.+)",
+        r"(\d+(?:\.\d+){0,4})\s*[:.\-–)]?\s+(.+)",
         line.strip(),
     )
     if not match:
@@ -241,7 +389,16 @@ def _numbered_heading(line: str) -> NodeSpec | None:
     if (
         not title
         or letter_count < 4
-        or not title[0].isupper()
+        or (
+            not title[0].isupper()
+            and not (
+                style
+                and (
+                    style.is_bold
+                    or _style_ratio(style, body_font_size) >= 1.15
+                )
+            )
+        )
         or len(title) > 100
         or len(title.split()) > 12
         or title.lower().startswith(IGNORED_HEADING_PREFIXES)
@@ -253,7 +410,13 @@ def _numbered_heading(line: str) -> NodeSpec | None:
     return NodeSpec(title=title, level=level, heading_number=number)
 
 
-def _unnumbered_heading(line: str, has_topic: bool) -> NodeSpec | None:
+def _unnumbered_heading(
+    line: str,
+    has_topic: bool,
+    style: StyledPDFLine | None = None,
+    body_font_size: float | None = None,
+    size_levels: dict[float, int] | None = None,
+) -> NodeSpec | None:
     title = _clean_heading_title(line)
     words = title.split()
     letters = [character for character in title if character.isalpha()]
@@ -267,10 +430,21 @@ def _unnumbered_heading(line: str, has_topic: bool) -> NodeSpec | None:
         return None
     if title.lower().startswith(IGNORED_HEADING_PREFIXES):
         return None
-    if not title.isupper():
+    styled_candidate = bool(
+        style
+        and (
+            style.is_bold
+            or _style_ratio(style, body_font_size) >= 1.15
+        )
+    )
+    if not title.isupper() and not styled_candidate:
         return None
 
-    level = 3 if has_topic else 2
+    level = (
+        _style_heading_level(style, body_font_size, has_topic, size_levels)
+        if styled_candidate and style
+        else (3 if has_topic else 2)
+    )
     return NodeSpec(title=title.title(), level=level, confidence=0.75)
 
 
@@ -332,8 +506,11 @@ def extract_outline_sections(
     filename: str,
     use_llm: bool | None = None,
     existing_paths: list[str] | None = None,
+    styled_lines: list[StyledPDFLine] | None = None,
 ) -> list[OrganizedSection]:
-    lines = _prepare_lines(text)
+    lines, line_styles = _prepare_lines(text, styled_lines)
+    body_font_size = _body_font_size(styled_lines or [])
+    size_levels = _heading_size_levels(styled_lines or [], body_font_size)
     current_path: list[NodeSpec] = []
     body_lines: list[str] = []
     sections: list[OrganizedSection] = []
@@ -351,6 +528,7 @@ def extract_outline_sections(
 
     for index, line in enumerate(lines):
         stripped = line.strip()
+        style = line_styles[index]
         if not stripped:
             if body_lines and body_lines[-1] != "":
                 body_lines.append("")
@@ -358,11 +536,14 @@ def extract_outline_sections(
 
         heading = _chapter_heading(lines, index)
         if heading is None:
-            heading = _numbered_heading(stripped)
+            heading = _numbered_heading(stripped, style, body_font_size)
         if heading is None:
             heading = _unnumbered_heading(
                 stripped,
                 has_topic=len(current_path) >= 2,
+                style=style,
+                body_font_size=body_font_size,
+                size_levels=size_levels,
             )
 
         if heading is None:
@@ -544,6 +725,7 @@ def organize_document(
         filename=document.filename,
         use_llm=use_llm,
         existing_paths=existing_subject_paths(db, document.subject_id),
+        styled_lines=extract_styled_pdf_lines(document.file_path),
     )
 
     # Do not hold a SQLite write lock while optional outline inference runs.
