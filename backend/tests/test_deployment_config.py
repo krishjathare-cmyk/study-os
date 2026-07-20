@@ -14,11 +14,12 @@ class DeploymentConfigTests(unittest.TestCase):
         _get_local_transcription_model.cache_clear()
 
     def test_jwt_secret_comes_from_environment(self):
+        secret = "configured-production-secret-at-least-32-bytes"
         with patch.dict(
             os.environ,
-            {"APP_ENV": "production", "JWT_SECRET": "configured-secret"},
+            {"APP_ENV": "production", "JWT_SECRET": secret},
         ):
-            self.assertEqual("configured-secret", _jwt_secret())
+            self.assertEqual(secret, _jwt_secret())
 
     def test_production_requires_jwt_secret(self):
         with patch.dict(
@@ -26,6 +27,14 @@ class DeploymentConfigTests(unittest.TestCase):
             {"APP_ENV": "production", "JWT_SECRET": ""},
         ):
             with self.assertRaisesRegex(RuntimeError, "JWT_SECRET"):
+                _jwt_secret()
+
+    def test_production_rejects_weak_jwt_secret(self):
+        with patch.dict(
+            os.environ,
+            {"APP_ENV": "production", "JWT_SECRET": "too-short"},
+        ):
+            with self.assertRaisesRegex(RuntimeError, "at least 32 bytes"):
                 _jwt_secret()
 
     def test_whisper_downloads_into_persistent_model_directory(self):

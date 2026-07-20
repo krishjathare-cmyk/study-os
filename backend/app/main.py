@@ -1,7 +1,8 @@
+import logging
 import os
 import secrets
-import shutil
 from datetime import datetime, timezone
+from typing import Literal
 from uuid import uuid4
 from app.llm_provider import (
     LLMProviderError,
@@ -12,7 +13,16 @@ from app.llm_provider import (
     set_request_llm_provider,
     transcribe_lecture_audio,
 )
-from fastapi import Depends, FastAPI, File, HTTPException, UploadFile, status
+from fastapi import (
+    Depends,
+    FastAPI,
+    File,
+    HTTPException,
+    Query,
+    Request,
+    UploadFile,
+    status,
+)
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from pydantic import ValidationError
@@ -28,17 +38,37 @@ from app.vecor_store import (
 from app.retrieval_utils import calculate_relevance_score
 from app import models, schemas
 from app.auth import (
+    DUMMY_PASSWORD_HASH,
+    SECRET_KEY,
     create_access_token,
     create_email_verification_token,
     decode_email_verification_token,
     get_current_user,
     hash_password,
+    password_hash_needs_update,
     verify_password,
 )
 from app.database import Base, engine, get_db
 from app.email_service import EmailDeliveryError, send_verification_email
 from app.google_identity import GoogleIdentityError, verify_google_id_token
 from app.pdf_utils import PDFExtractionError, extract_text_from_pdf
+from app.security import (
+    GENERIC_GOOGLE_AUTH_MESSAGE,
+    GENERIC_LOGIN_MESSAGE,
+    GENERIC_REGISTRATION_MESSAGE,
+    LOGIN_CLIENT_MAX_ATTEMPTS,
+    check_login_allowed,
+    clear_login_failures,
+    enforce_bounded_audio_upload,
+    login_attempt_fingerprint,
+    normalize_email_address,
+    normalize_free_text,
+    record_login_failure,
+    request_client_address,
+    sanitize_audio_filename,
+    sanitize_display_filename,
+    save_bounded_pdf_upload,
+)
 from app.storage import UPLOAD_DIR
 from app.study_organizer import organize_document, prune_empty_nodes
 from app.study_workflow import (
@@ -62,6 +92,19 @@ from app.study_workflow import (
 )
 
 Base.metadata.create_all(bind=engine)
+logger = logging.getLogger(__name__)
+
+
+def _configured_megabytes(name: str, default: int) -> int:
+    try:
+        value = int(os.getenv(name, str(default)))
+    except ValueError:
+        value = default
+    return min(500, max(1, value)) * 1024 * 1024
+
+
+MAX_PDF_UPLOAD_BYTES = _configured_megabytes("MAX_PDF_UPLOAD_MB", 50)
+MAX_AUDIO_CHUNK_BYTES = _configured_megabytes("MAX_AUDIO_CHUNK_MB", 25)
 
 # Add fields introduced after the first SQLite database was created.
 if engine.dialect.name == "sqlite":
@@ -152,7 +195,22 @@ app.add_middleware(
 async def select_llm_provider(request, call_next):
     token = set_request_llm_provider(request.headers.get("X-LLM-Provider"))
     try:
-        return await call_next(request)
+        response = await call_next(request)
+        response.headers["X-Content-Type-Options"] = "nosniff"
+        response.headers["X-Frame-Options"] = "DENY"
+        response.headers["Referrer-Policy"] = "no-referrer"
+        response.headers["Permissions-Policy"] = (
+            "camera=(), geolocation=(), payment=(), usb=()"
+        )
+        if request.url.path in {
+            "/login",
+            "/register",
+            "/verify-email",
+            "/resend-verification",
+            "/auth/google",
+        }:
+            response.headers["Cache-Control"] = "no-store"
+        return response
     finally:
         reset_request_llm_provider(token)
 
@@ -367,7 +425,7 @@ def health_check():
 
 
 def _normalized_email(email: str) -> str:
-    return email.strip().lower()
+    return normalize_email_address(email)
 
 
 def _create_initial_workspace(
@@ -398,26 +456,30 @@ def _deliver_verification(user: models.User) -> None:
     send_verification_email(user.email, user.full_name, token)
 
 
-@app.post("/register", response_model=schemas.UserResponse, status_code=status.HTTP_201_CREATED)
+@app.post(
+    "/register",
+    response_model=schemas.MessageResponse,
+    status_code=status.HTTP_202_ACCEPTED,
+)
 def register_user(
     user: schemas.UserCreate,
     db: Session = Depends(get_db)
 ):
     email = _normalized_email(user.email)
+    # Hash before checking existence so duplicate registration has comparable
+    # work and cannot use response timing to enumerate accounts.
+    submitted_password_hash = hash_password(user.password)
     existing_user = db.query(models.User).filter(
         models.User.email == email
     ).first()
 
     if existing_user:
-        raise HTTPException(
-            status_code=400,
-            detail="Email already registered. Sign in or resend verification."
-        )
+        return {"message": GENERIC_REGISTRATION_MESSAGE}
 
     new_user = models.User(
-        full_name=user.full_name.strip(),
+        full_name=user.full_name,
         email=email,
-        hashed_password=hash_password(user.password),
+        hashed_password=submitted_password_hash,
         account_type=user.account_type,
         auth_provider="password",
         email_verified=False,
@@ -432,45 +494,89 @@ def register_user(
 
     try:
         _deliver_verification(new_user)
-    except EmailDeliveryError as error:
-        raise HTTPException(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail=(
-                "Your account was created, but the verification email could "
-                "not be sent. Use resend verification after email is configured."
-            ),
-        ) from error
+    except EmailDeliveryError:
+        # Do not change the public response based on whether an account exists.
+        logger.exception("Verification email delivery failed during registration")
 
-    return new_user
+    return {"message": GENERIC_REGISTRATION_MESSAGE}
 
 
 @app.post("/login", response_model=schemas.TokenResponse)
 def login_user(
     login_data: schemas.LoginRequest,
-    db: Session = Depends(get_db)
+    db: Session = Depends(get_db),
+    request: Request = None,
 ):
     email = _normalized_email(login_data.email)
+    client_address = request_client_address(request)
+    fingerprints = (
+        (
+            login_attempt_fingerprint(
+                email,
+                client_address,
+                SECRET_KEY,
+                scope="account",
+            ),
+            None,
+        ),
+        (
+            login_attempt_fingerprint(
+                email,
+                client_address,
+                SECRET_KEY,
+                scope="client",
+            ),
+            LOGIN_CLIENT_MAX_ATTEMPTS,
+        ),
+    )
+    for fingerprint, _ in fingerprints:
+        retry_after = check_login_allowed(db, fingerprint)
+        if retry_after is not None:
+            raise HTTPException(
+                status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+                detail="Too many sign-in attempts. Try again later.",
+                headers={"Retry-After": str(retry_after)},
+            )
+
     user = db.query(models.User).filter(
         models.User.email == email
     ).first()
 
-    if user is None:
+    password_matches = verify_password(
+        login_data.password,
+        user.hashed_password if user is not None else DUMMY_PASSWORD_HASH,
+    )
+    if user is None or not password_matches or not user.email_verified:
+        retry_values = [
+            record_login_failure(
+                db,
+                fingerprint,
+                **({"max_attempts": maximum} if maximum is not None else {}),
+            )
+            for fingerprint, maximum in fingerprints
+        ]
+        retry_after = next(
+            (value for value in retry_values if value is not None),
+            None,
+        )
+        if retry_after is not None:
+            raise HTTPException(
+                status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+                detail="Too many sign-in attempts. Try again later.",
+                headers={"Retry-After": str(retry_after)},
+            )
         raise HTTPException(
-            status_code=401,
-            detail="Invalid email or password"
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail=GENERIC_LOGIN_MESSAGE,
+            headers={"WWW-Authenticate": "Bearer"},
         )
 
-    if not verify_password(login_data.password, user.hashed_password):
-        raise HTTPException(
-            status_code=401,
-            detail="Invalid email or password"
-        )
-
-    if not user.email_verified:
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="Verify your email address before signing in",
-        )
+    for fingerprint, _ in fingerprints:
+        clear_login_failures(db, fingerprint)
+    if password_hash_needs_update(user.hashed_password):
+        user.hashed_password = hash_password(login_data.password)
+        db.commit()
+        db.refresh(user)
 
     return _issue_session(user)
 
@@ -485,7 +591,7 @@ def verify_email_address(
     except ValueError as error:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail=str(error),
+            detail="Verification link is invalid or expired",
         ) from error
 
     user = db.query(models.User).filter(
@@ -498,11 +604,16 @@ def verify_email_address(
             detail="Verification link is invalid",
         )
 
-    if not user.email_verified:
-        user.email_verified = True
-        user.email_verified_at = datetime.now(timezone.utc)
-        db.commit()
-        db.refresh(user)
+    if user.email_verified:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Verification link is invalid or expired",
+        )
+
+    user.email_verified = True
+    user.email_verified_at = datetime.now(timezone.utc)
+    db.commit()
+    db.refresh(user)
 
     return _issue_session(user)
 
@@ -533,11 +644,8 @@ def resend_email_verification(
     db.refresh(user)
     try:
         _deliver_verification(user)
-    except EmailDeliveryError as error:
-        raise HTTPException(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail="The verification email could not be sent. Try again later.",
-        ) from error
+    except EmailDeliveryError:
+        logger.exception("Verification email delivery failed during resend")
 
     return {"message": generic_message}
 
@@ -560,11 +668,21 @@ def authenticate_with_google(
                 if configuration_error
                 else status.HTTP_401_UNAUTHORIZED
             ),
-            detail=str(error),
+            detail=(
+                "Google sign-in is temporarily unavailable"
+                if configuration_error
+                else GENERIC_GOOGLE_AUTH_MESSAGE
+            ),
         ) from error
 
     google_subject = str(claims["sub"])
-    email = _normalized_email(str(claims["email"]))
+    try:
+        email = _normalized_email(str(claims["email"]))
+    except ValueError as error:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail=GENERIC_GOOGLE_AUTH_MESSAGE,
+        ) from error
     user = db.query(models.User).filter(
         models.User.google_subject == google_subject
     ).first()
@@ -577,7 +695,7 @@ def authenticate_with_google(
             if email_user.google_subject:
                 raise HTTPException(
                     status_code=status.HTTP_409_CONFLICT,
-                    detail="This email is linked to a different Google account",
+                    detail=GENERIC_GOOGLE_AUTH_MESSAGE,
                 )
             google_is_email_authority = (
                 email.endswith("@gmail.com")
@@ -586,10 +704,7 @@ def authenticate_with_google(
             if email_user.email_verified and not google_is_email_authority:
                 raise HTTPException(
                     status_code=status.HTTP_409_CONFLICT,
-                    detail=(
-                        "An account already exists with this email. Sign in "
-                        "with your password first to connect Google."
-                    ),
+                    detail=GENERIC_GOOGLE_AUTH_MESSAGE,
                 )
 
             if not email_user.email_verified:
@@ -607,15 +722,21 @@ def authenticate_with_google(
     if user is None:
         if not request.create_account:
             raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail=(
-                    "No account uses this Google email. Choose Create account "
-                    "and select Student or Professional first."
-                ),
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail=GENERIC_GOOGLE_AUTH_MESSAGE,
             )
 
+        try:
+            google_name = normalize_free_text(
+                str(claims.get("name") or email.split("@")[0]),
+                field_name="Google profile name",
+                min_length=1,
+                max_length=120,
+            )
+        except ValueError:
+            google_name = email.split("@")[0][:120]
         user = models.User(
-            full_name=(claims.get("name") or email.split("@")[0]).strip(),
+            full_name=google_name,
             email=email,
             hashed_password=hash_password(secrets.token_urlsafe(32)),
             account_type=request.account_type,
@@ -832,17 +953,14 @@ def get_subjects(
 @app.post("/subjects/{subject_id}/documents", response_model=schemas.DocumentResponse)
 def upload_document(
     subject_id: int,
-    document_type: str,
+    document_type: Literal["textbook"] = "textbook",
     file: UploadFile = File(...),
     db: Session = Depends(get_db),
     current_user: models.User = Depends(get_current_user)
 ):
     get_owned_subject(db, subject_id, current_user.id)
 
-    if not file.filename.lower().endswith(".pdf"):
-        raise HTTPException(status_code=400, detail="Only PDF files are allowed")
-
-    safe_filename = file.filename.replace(" ", "_")
+    display_filename = sanitize_display_filename(file.filename, ".pdf")
     user_upload_dir = os.path.join(
         UPLOAD_DIR,
         f"user_{current_user.id}",
@@ -850,10 +968,12 @@ def upload_document(
     )
     os.makedirs(user_upload_dir, exist_ok=True)
 
-    file_path = os.path.join(user_upload_dir, safe_filename)
-
-    with open(file_path, "wb") as buffer:
-        shutil.copyfileobj(file.file, buffer)
+    file_path = os.path.join(user_upload_dir, f"{uuid4().hex}.pdf")
+    save_bounded_pdf_upload(
+        file,
+        file_path,
+        max_bytes=MAX_PDF_UPLOAD_BYTES,
+    )
 
     try:
         extracted_text = extract_text_from_pdf(file_path)
@@ -867,7 +987,7 @@ def upload_document(
         raise HTTPException(status_code=422, detail=UPLOAD_RETRY_MESSAGE)
 
     document = models.Document(
-        filename=file.filename,
+        filename=display_filename,
         file_path=file_path,
         document_type=document_type,
         extracted_text=extracted_text,
@@ -1123,8 +1243,8 @@ def transcribe_lecture_chunk(
     subject_id: int,
     lecture_id: int,
     file: UploadFile = File(...),
-    chunk_index: int = 0,
-    offset_seconds: float = 0.0,
+    chunk_index: int = Query(default=0, ge=0, le=100000),
+    offset_seconds: float = Query(default=0.0, ge=0.0, le=86400.0),
     db: Session = Depends(get_db),
     current_user: models.User = Depends(get_current_user),
 ):
@@ -1132,13 +1252,17 @@ def transcribe_lecture_chunk(
     lecture = get_owned_lecture(db, subject_id, lecture_id, current_user.id)
     if lecture.status == "ready":
         raise HTTPException(status_code=409, detail="Lecture has already been finalized")
-    if chunk_index < 0:
-        raise HTTPException(status_code=400, detail="chunk_index must be non-negative")
+
+    audio_filename = sanitize_audio_filename(
+        file.filename,
+        f"lecture-{lecture_id}-{chunk_index}.webm",
+    )
+    enforce_bounded_audio_upload(file, max_bytes=MAX_AUDIO_CHUNK_BYTES)
 
     try:
         text = transcribe_lecture_audio(
             file.file,
-            file.filename or f"lecture-{lecture_id}-{chunk_index}.webm",
+            audio_filename,
             file.content_type,
         )
     except LLMProviderError as error:
@@ -1573,10 +1697,7 @@ def upload_assignment(
 ):
     require_student_account(current_user)
     get_owned_subject(db, subject_id, current_user.id)
-    if not file.filename or not file.filename.lower().endswith(".pdf"):
-        raise HTTPException(status_code=400, detail="Only PDF files are allowed")
-
-    safe_filename = f"{uuid4().hex}_{file.filename.replace(' ', '_')}"
+    display_filename = sanitize_display_filename(file.filename, ".pdf")
     assignment_dir = os.path.join(
         UPLOAD_DIR,
         f"user_{current_user.id}",
@@ -1584,9 +1705,12 @@ def upload_assignment(
         "assignments",
     )
     os.makedirs(assignment_dir, exist_ok=True)
-    file_path = os.path.join(assignment_dir, safe_filename)
-    with open(file_path, "wb") as buffer:
-        shutil.copyfileobj(file.file, buffer)
+    file_path = os.path.join(assignment_dir, f"{uuid4().hex}.pdf")
+    save_bounded_pdf_upload(
+        file,
+        file_path,
+        max_bytes=MAX_PDF_UPLOAD_BYTES,
+    )
 
     try:
         extracted_text = extract_text_from_pdf(file_path)
@@ -1601,7 +1725,7 @@ def upload_assignment(
 
     assignment = models.AssignmentDocument(
         subject_id=subject_id,
-        filename=file.filename,
+        filename=display_filename,
         file_path=file_path,
         extracted_text=extracted_text,
         processing_status="processing",

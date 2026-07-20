@@ -4,6 +4,8 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
+from app.security import normalize_email_address, normalize_free_text
+
 
 PASSWORD_POLICY_MESSAGE = (
     "Password must be 8–72 characters and include a lowercase letter, "
@@ -11,23 +13,66 @@ PASSWORD_POLICY_MESSAGE = (
 )
 
 
-class UserCreate(BaseModel):
-    full_name: str
-    email: str
+class RequestModel(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+
+def _validated_password(password: str, *, enforce_strength: bool) -> str:
+    if "\x00" in password or len(password.encode("utf-8")) > 72:
+        raise ValueError("Password must be at most 72 UTF-8 bytes")
+    if enforce_strength and (
+        not re.search(r"[a-z]", password)
+        or not re.search(r"[A-Z]", password)
+        or not re.search(r"\d", password)
+        or not re.search(r"[^\w\s]", password)
+    ):
+        raise ValueError(PASSWORD_POLICY_MESSAGE)
+    return password
+
+
+def _normalize_text_list(
+    values: list[str],
+    *,
+    field_name: str,
+    item_max_length: int,
+) -> list[str]:
+    return [
+        normalize_free_text(
+            value,
+            field_name=field_name,
+            min_length=1,
+            max_length=item_max_length,
+            multiline=True,
+        )
+        for value in values
+    ]
+
+
+class UserCreate(RequestModel):
+    full_name: str = Field(min_length=1, max_length=120)
+    email: str = Field(min_length=3, max_length=254)
     password: str = Field(min_length=8, max_length=72)
     account_type: Literal["student", "professional"] = "student"
+
+    @field_validator("full_name")
+    @classmethod
+    def validate_full_name(cls, value: str) -> str:
+        return normalize_free_text(
+            value,
+            field_name="Full name",
+            min_length=1,
+            max_length=120,
+        )
+
+    @field_validator("email")
+    @classmethod
+    def validate_email(cls, value: str) -> str:
+        return normalize_email_address(value)
 
     @field_validator("password")
     @classmethod
     def enforce_password_policy(cls, password: str) -> str:
-        if (
-            not re.search(r"[a-z]", password)
-            or not re.search(r"[A-Z]", password)
-            or not re.search(r"\d", password)
-            or not re.search(r"[^\w\s]", password)
-        ):
-            raise ValueError(PASSWORD_POLICY_MESSAGE)
-        return password
+        return _validated_password(password, enforce_strength=True)
 
 
 class UserResponse(BaseModel):
@@ -41,23 +86,59 @@ class UserResponse(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
 
-class LoginRequest(BaseModel):
-    email: str
+class LoginRequest(RequestModel):
+    email: str = Field(min_length=3, max_length=254)
     password: str = Field(min_length=1, max_length=72)
 
-
-class EmailRequest(BaseModel):
-    email: str
-
-
-class EmailVerificationRequest(BaseModel):
-    token: str = Field(min_length=20)
+    @field_validator("email")
+    @classmethod
+    def validate_email(cls, value: str) -> str:
+        return normalize_email_address(value)
 
 
-class GoogleAuthRequest(BaseModel):
-    credential: str = Field(min_length=20)
+    @field_validator("password")
+    @classmethod
+    def validate_password(cls, value: str) -> str:
+        return _validated_password(value, enforce_strength=False)
+
+
+class EmailRequest(RequestModel):
+    email: str = Field(min_length=3, max_length=254)
+
+    @field_validator("email")
+    @classmethod
+    def validate_email(cls, value: str) -> str:
+        return normalize_email_address(value)
+
+
+class EmailVerificationRequest(RequestModel):
+    token: str = Field(min_length=20, max_length=4096)
+
+    @field_validator("token")
+    @classmethod
+    def validate_token(cls, value: str) -> str:
+        return normalize_free_text(
+            value,
+            field_name="Verification token",
+            min_length=20,
+            max_length=4096,
+        )
+
+
+class GoogleAuthRequest(RequestModel):
+    credential: str = Field(min_length=20, max_length=16384)
     account_type: Literal["student", "professional"] = "student"
     create_account: bool = False
+
+    @field_validator("credential")
+    @classmethod
+    def validate_credential(cls, value: str) -> str:
+        return normalize_free_text(
+            value,
+            field_name="Google credential",
+            min_length=20,
+            max_length=16384,
+        )
 
 
 class MessageResponse(BaseModel):
@@ -69,9 +150,32 @@ class TokenResponse(BaseModel):
     token_type: str
     user: UserResponse
 
-class SemesterCreate(BaseModel):
-    name: str
-    description: str | None = None
+class SemesterCreate(RequestModel):
+    name: str = Field(min_length=1, max_length=120)
+    description: str | None = Field(default=None, max_length=2000)
+
+    @field_validator("name")
+    @classmethod
+    def validate_name(cls, value: str) -> str:
+        return normalize_free_text(
+            value,
+            field_name="Workspace name",
+            min_length=1,
+            max_length=120,
+        )
+
+    @field_validator("description")
+    @classmethod
+    def validate_description(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        normalized = normalize_free_text(
+            value,
+            field_name="Workspace description",
+            max_length=2000,
+            multiline=True,
+        )
+        return normalized or None
 
 
 class SemesterResponse(BaseModel):
@@ -82,10 +186,33 @@ class SemesterResponse(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
 
-class SubjectCreate(BaseModel):
-    name: str
-    description: str | None = None
-    semester_id: int
+class SubjectCreate(RequestModel):
+    name: str = Field(min_length=1, max_length=160)
+    description: str | None = Field(default=None, max_length=2000)
+    semester_id: int = Field(gt=0)
+
+    @field_validator("name")
+    @classmethod
+    def validate_name(cls, value: str) -> str:
+        return normalize_free_text(
+            value,
+            field_name="Subject name",
+            min_length=1,
+            max_length=160,
+        )
+
+    @field_validator("description")
+    @classmethod
+    def validate_description(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        normalized = normalize_free_text(
+            value,
+            field_name="Subject description",
+            max_length=2000,
+            multiline=True,
+        )
+        return normalized or None
 
 
 class SubjectResponse(BaseModel):
@@ -157,7 +284,7 @@ class StudyNodeDetail(BaseModel):
     source_pages: list[StudyNodeSourcePage] = Field(default_factory=list)
 
 
-class OrganizeSubjectRequest(BaseModel):
+class OrganizeSubjectRequest(RequestModel):
     force: bool = False
     reindex_vectors: bool = True
     use_llm: bool | None = None
@@ -171,9 +298,20 @@ class OrganizeSubjectResponse(BaseModel):
     chunks_linked: int
     vector_indexed: bool
 
-class RetrievalRequest(BaseModel):
-    query: str
-    top_k: int = 5
+class RetrievalRequest(RequestModel):
+    query: str = Field(min_length=1, max_length=4000)
+    top_k: int = Field(default=5, ge=1, le=20)
+
+    @field_validator("query")
+    @classmethod
+    def validate_query(cls, value: str) -> str:
+        return normalize_free_text(
+            value,
+            field_name="Query",
+            min_length=1,
+            max_length=4000,
+            multiline=True,
+        )
 
 
 class RetrievalResultResponse(BaseModel):
@@ -188,9 +326,20 @@ class RetrievalResultResponse(BaseModel):
     expanded_queries: list[str]
     subtopic_id: int | None = None
 
-class ChatRequest(BaseModel):
-    question: str
-    top_k: int = 5
+class ChatRequest(RequestModel):
+    question: str = Field(min_length=1, max_length=4000)
+    top_k: int = Field(default=5, ge=1, le=20)
+
+    @field_validator("question")
+    @classmethod
+    def validate_question(cls, value: str) -> str:
+        return normalize_free_text(
+            value,
+            field_name="Question",
+            min_length=1,
+            max_length=4000,
+            multiline=True,
+        )
 
 
 class ChatSource(BaseModel):
@@ -283,13 +432,34 @@ class LearningContentResponse(BaseModel):
     generated_at: datetime
 
 
-class StudentNoteCreate(BaseModel):
+class StudentNoteCreate(RequestModel):
     content: str = Field(min_length=1, max_length=20000)
 
+    @field_validator("content")
+    @classmethod
+    def validate_content(cls, value: str) -> str:
+        return normalize_free_text(
+            value,
+            field_name="Note",
+            min_length=1,
+            max_length=20000,
+            multiline=True,
+        )
 
-class StudentNoteUpdate(BaseModel):
+
+class StudentNoteUpdate(RequestModel):
     content: str = Field(min_length=1, max_length=20000)
 
+    @field_validator("content")
+    @classmethod
+    def validate_content(cls, value: str) -> str:
+        return normalize_free_text(
+            value,
+            field_name="Note",
+            min_length=1,
+            max_length=20000,
+            multiline=True,
+        )
 
 class StudentNoteResponse(BaseModel):
     id: int
@@ -301,20 +471,77 @@ class StudentNoteResponse(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
 
-class StructuredNoteSection(BaseModel):
+class StructuredNoteSection(RequestModel):
     heading: str = Field(min_length=1, max_length=240)
     summary: str = Field(default="", max_length=4000)
     points: list[str] = Field(default_factory=list, max_length=30)
 
+    @field_validator("heading")
+    @classmethod
+    def validate_heading(cls, value: str) -> str:
+        return normalize_free_text(
+            value,
+            field_name="Section heading",
+            min_length=1,
+            max_length=240,
+        )
 
-class PromptNoteData(BaseModel):
+    @field_validator("summary")
+    @classmethod
+    def validate_summary(cls, value: str) -> str:
+        return normalize_free_text(
+            value,
+            field_name="Section summary",
+            max_length=4000,
+            multiline=True,
+        )
+
+    @field_validator("points")
+    @classmethod
+    def validate_points(cls, values: list[str]) -> list[str]:
+        return _normalize_text_list(
+            values,
+            field_name="Section point",
+            item_max_length=2000,
+        )
+
+
+class PromptNoteData(RequestModel):
     overview: str = Field(default="", max_length=8000)
     sections: list[StructuredNoteSection] = Field(default_factory=list, max_length=20)
     key_points: list[str] = Field(default_factory=list, max_length=40)
     questions: list[str] = Field(default_factory=list, max_length=30)
 
+    @field_validator("overview")
+    @classmethod
+    def validate_overview(cls, value: str) -> str:
+        return normalize_free_text(
+            value,
+            field_name="Notes overview",
+            max_length=8000,
+            multiline=True,
+        )
 
-class NodeNoteDocumentUpdate(BaseModel):
+    @field_validator("key_points")
+    @classmethod
+    def validate_key_points(cls, values: list[str]) -> list[str]:
+        return _normalize_text_list(
+            values,
+            field_name="Key point",
+            item_max_length=2000,
+        )
+
+    @field_validator("questions")
+    @classmethod
+    def validate_questions(cls, values: list[str]) -> list[str]:
+        return _normalize_text_list(
+            values,
+            field_name="Question",
+            item_max_length=2000,
+        )
+
+
+class NodeNoteDocumentUpdate(RequestModel):
     notes: PromptNoteData
 
 
@@ -326,20 +553,40 @@ class NodeNoteDocumentResponse(BaseModel):
     updated_at: datetime | None = None
 
 
-class PromptNoteComposeRequest(BaseModel):
+class PromptNoteComposeRequest(RequestModel):
     instruction: str = Field(min_length=1, max_length=4000)
     notes: PromptNoteData
 
+    @field_validator("instruction")
+    @classmethod
+    def validate_instruction(cls, value: str) -> str:
+        return normalize_free_text(
+            value,
+            field_name="Editing instruction",
+            min_length=1,
+            max_length=4000,
+            multiline=True,
+        )
 
 class PromptNoteComposeResponse(BaseModel):
     notes: PromptNoteData
     message: str
 
 
-class NodeChatRequest(BaseModel):
+class NodeChatRequest(RequestModel):
     question: str = Field(min_length=1, max_length=4000)
     max_context_chunks: int = Field(default=8, ge=1, le=20)
 
+    @field_validator("question")
+    @classmethod
+    def validate_question(cls, value: str) -> str:
+        return normalize_free_text(
+            value,
+            field_name="Question",
+            min_length=1,
+            max_length=4000,
+            multiline=True,
+        )
 
 class NodeChatSource(BaseModel):
     chunk_id: int
@@ -354,7 +601,7 @@ class NodeChatResponse(BaseModel):
     sources: list[NodeChatSource]
 
 
-class ProgressUpdateRequest(BaseModel):
+class ProgressUpdateRequest(RequestModel):
     completed: bool
 
 
@@ -416,8 +663,29 @@ class TopicTestResponse(BaseModel):
     questions: list[PublicQuestion]
 
 
-class TestSubmitRequest(BaseModel):
-    answers: dict[str, str]
+class TestSubmitRequest(RequestModel):
+    answers: dict[str, str] = Field(max_length=100)
+
+    @field_validator("answers")
+    @classmethod
+    def validate_answers(cls, answers: dict[str, str]) -> dict[str, str]:
+        validated = {}
+        for key, value in answers.items():
+            safe_key = normalize_free_text(
+                key,
+                field_name="Answer identifier",
+                min_length=1,
+                max_length=120,
+            )
+            safe_value = normalize_free_text(
+                value,
+                field_name="Answer",
+                min_length=1,
+                max_length=2000,
+                multiline=True,
+            )
+            validated[safe_key] = safe_value
+        return validated
 
 
 class TestAttemptResponse(BaseModel):
@@ -451,19 +719,57 @@ class DailyPlanResponse(BaseModel):
     topic_tests: list[TopicTestResponse]
 
 
-class LectureCreate(BaseModel):
+class LectureCreate(RequestModel):
     title: str | None = Field(default=None, max_length=240)
 
+    @field_validator("title")
+    @classmethod
+    def validate_title(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        normalized = normalize_free_text(
+            value,
+            field_name="Lecture title",
+            max_length=240,
+        )
+        return normalized or None
 
-class LectureNote(BaseModel):
-    overview: str = ""
-    key_concepts: list[str] = Field(default_factory=list)
-    definitions: list[str] = Field(default_factory=list)
-    formulas: list[str] = Field(default_factory=list)
-    examples: list[str] = Field(default_factory=list)
-    questions: list[str] = Field(default_factory=list)
-    unclear_points: list[str] = Field(default_factory=list)
-    recap: str = ""
+
+class LectureNote(RequestModel):
+    overview: str = Field(default="", max_length=8000)
+    key_concepts: list[str] = Field(default_factory=list, max_length=50)
+    definitions: list[str] = Field(default_factory=list, max_length=50)
+    formulas: list[str] = Field(default_factory=list, max_length=50)
+    examples: list[str] = Field(default_factory=list, max_length=50)
+    questions: list[str] = Field(default_factory=list, max_length=50)
+    unclear_points: list[str] = Field(default_factory=list, max_length=50)
+    recap: str = Field(default="", max_length=8000)
+
+    @field_validator("overview", "recap")
+    @classmethod
+    def validate_long_text(cls, value: str) -> str:
+        return normalize_free_text(
+            value,
+            field_name="Lecture note text",
+            max_length=8000,
+            multiline=True,
+        )
+
+    @field_validator(
+        "key_concepts",
+        "definitions",
+        "formulas",
+        "examples",
+        "questions",
+        "unclear_points",
+    )
+    @classmethod
+    def validate_note_items(cls, values: list[str]) -> list[str]:
+        return _normalize_text_list(
+            values,
+            field_name="Lecture note item",
+            item_max_length=2000,
+        )
 
 
 class LectureResponse(BaseModel):

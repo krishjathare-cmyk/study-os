@@ -32,6 +32,22 @@ class User(Base):
 
     semesters = relationship("Semester", back_populates="user")
 
+
+class LoginAttempt(Base):
+    __tablename__ = "login_attempts"
+
+    # This is a keyed digest of email + client address, never a raw email.
+    fingerprint = Column(String(64), primary_key=True)
+    failed_attempts = Column(Integer, nullable=False, default=0)
+    window_started_at = Column(DateTime(timezone=True), nullable=False)
+    locked_until = Column(DateTime(timezone=True), nullable=True)
+    updated_at = Column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        onupdate=func.now(),
+    )
+
+
 class Semester(Base):
     __tablename__ = "semesters"
 

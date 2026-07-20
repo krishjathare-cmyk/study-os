@@ -27,7 +27,7 @@ class AccountModeTests(unittest.TestCase):
 
     def test_professional_registration_creates_pdf_library(self):
         with patch("app.main.send_verification_email"):
-            professional = register_user(
+            response = register_user(
                 schemas.UserCreate(
                     full_name="Professional User",
                     email="professional@example.com",
@@ -36,6 +36,10 @@ class AccountModeTests(unittest.TestCase):
                 ),
                 self.db,
             )
+        self.assertIn("check your email", response["message"])
+        professional = self.db.query(models.User).filter_by(
+            email="professional@example.com",
+        ).one()
 
         self.assertEqual("professional", professional.account_type)
         self.assertFalse(professional.email_verified)

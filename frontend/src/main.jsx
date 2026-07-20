@@ -631,14 +631,18 @@ function AuthScreen({ onAuthenticated }) {
     const token = new URLSearchParams(window.location.search).get("verify_email");
     if (!token) return;
 
+    const cleanUrl = new URL(window.location.href);
+    cleanUrl.searchParams.delete("verify_email");
+    window.history.replaceState(
+      null,
+      "",
+      `${cleanUrl.pathname}${cleanUrl.search}${cleanUrl.hash}`
+    );
     setMode("login");
     setVerifyingLink(true);
     setError("");
     api.verifyEmail(token)
       .then((result) => {
-        const url = new URL(window.location.href);
-        url.searchParams.delete("verify_email");
-        window.history.replaceState(null, "", `${url.pathname}${url.search}${url.hash}`);
         finishAuthentication(result);
       })
       .catch((err) => setError(err.message || "This verification link could not be used"))
@@ -689,20 +693,19 @@ function AuthScreen({ onAuthenticated }) {
     setError("");
     try {
       if (mode === "register") {
-        await api.register({ ...form, account_type: accountType });
+        const result = await api.register({ ...form, account_type: accountType });
         setVerificationEmail(form.email);
-        setVerificationMessage(`We sent a verification link to ${form.email}.`);
+        setVerificationMessage(result.message);
         return;
       }
       const result = await api.login({ email: form.email, password: form.password });
       finishAuthentication(result);
     } catch (err) {
-      if (mode === "login" && err instanceof ApiError && err.status === 403) {
+      if (mode === "login" && err instanceof ApiError && err.status === 401) {
         setVerificationEmail(form.email);
-        setVerificationMessage("Your account exists, but its email still needs verification.");
-      } else if (mode === "register" && err instanceof ApiError && err.status === 503) {
-        setVerificationEmail(form.email);
-        setVerificationMessage("Your account was created, but email delivery needs attention. Try resending once the email service is available.");
+        setVerificationMessage(
+          "Sign-in failed. If this is an unverified email account, you can request another verification link."
+        );
         setError(err.message);
       } else {
         setError(err.message || "Unable to sign in");

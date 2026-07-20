@@ -7,7 +7,7 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
 from app import models, schemas
-from app.auth import create_email_verification_token
+from app.auth import create_email_verification_token, verify_password
 from app.database import Base
 from app.main import (
     authenticate_with_google,
@@ -28,7 +28,7 @@ class AuthenticationTests(unittest.TestCase):
 
     def _register(self, email="reader@example.com"):
         with patch("app.main.send_verification_email"):
-            return register_user(
+            register_user(
                 schemas.UserCreate(
                     full_name="Reader",
                     email=email,
@@ -37,6 +37,7 @@ class AuthenticationTests(unittest.TestCase):
                 ),
                 self.db,
             )
+        return self.db.query(models.User).filter_by(email=email).one()
 
     def test_registration_rejects_each_missing_password_requirement(self):
         weak_passwords = (
@@ -67,16 +68,44 @@ class AuthenticationTests(unittest.TestCase):
                 ),
                 self.db,
             )
-        self.assertEqual(403, raised.exception.status_code)
-
-        session = verify_email_address(
-            schemas.EmailVerificationRequest(
-                token=create_email_verification_token(user.id, user.email)
-            ),
-            self.db,
+        self.assertEqual(401, raised.exception.status_code)
+        self.assertEqual(
+            "Unable to sign in with those credentials",
+            raised.exception.detail,
         )
+
+        verification = schemas.EmailVerificationRequest(
+            token=create_email_verification_token(user.id, user.email)
+        )
+        session = verify_email_address(verification, self.db)
         self.assertTrue(session["user"].email_verified)
         self.assertTrue(session["access_token"])
+
+        with self.assertRaises(HTTPException) as replay:
+            verify_email_address(verification, self.db)
+        self.assertEqual(400, replay.exception.status_code)
+
+    def test_password_is_only_stored_as_a_bcrypt_hash(self):
+        user = self._register()
+
+        self.assertNotEqual("Secure-password1!", user.hashed_password)
+        self.assertTrue(user.hashed_password.startswith("$2"))
+        self.assertTrue(
+            verify_password("Secure-password1!", user.hashed_password)
+        )
+
+    def test_duplicate_registration_does_not_reveal_account_existence(self):
+        user = schemas.UserCreate(
+            full_name="Reader",
+            email="reader@example.com",
+            password="Secure-password1!",
+        )
+        with patch("app.main.send_verification_email"):
+            first = register_user(user, self.db)
+            second = register_user(user, self.db)
+
+        self.assertEqual(first, second)
+        self.assertEqual(1, self.db.query(models.User).count())
 
     def test_google_token_creates_verified_professional_account(self):
         claims = {
