@@ -1,12 +1,19 @@
 import unittest
+from unittest.mock import patch
 
 from fastapi import HTTPException
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
 from app import models, schemas
+from app.auth import create_email_verification_token
 from app.database import Base
-from app.main import login_user, register_user, require_student_account
+from app.main import (
+    login_user,
+    register_user,
+    require_student_account,
+    verify_email_address,
+)
 
 
 class AccountModeTests(unittest.TestCase):
@@ -19,26 +26,39 @@ class AccountModeTests(unittest.TestCase):
         self.db.close()
 
     def test_professional_registration_creates_pdf_library(self):
-        professional = register_user(
-            schemas.UserCreate(
-                full_name="Professional User",
-                email="professional@example.com",
-                password="secure-password",
-                account_type="professional",
-            ),
-            self.db,
-        )
+        with patch("app.main.send_verification_email"):
+            professional = register_user(
+                schemas.UserCreate(
+                    full_name="Professional User",
+                    email="professional@example.com",
+                    password="Secure-password1!",
+                    account_type="professional",
+                ),
+                self.db,
+            )
 
         self.assertEqual("professional", professional.account_type)
+        self.assertFalse(professional.email_verified)
         library = self.db.query(models.Semester).filter_by(
             user_id=professional.id,
         ).one()
         self.assertEqual("Professional library", library.name)
 
+        verification = verify_email_address(
+            schemas.EmailVerificationRequest(
+                token=create_email_verification_token(
+                    professional.id,
+                    professional.email,
+                )
+            ),
+            self.db,
+        )
+        self.assertTrue(verification["user"].email_verified)
+
         login = login_user(
             schemas.LoginRequest(
                 email="professional@example.com",
-                password="secure-password",
+                password="Secure-password1!",
             ),
             self.db,
         )

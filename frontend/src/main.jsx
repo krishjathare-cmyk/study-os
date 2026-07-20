@@ -547,26 +547,179 @@ function DemoExperience() {
   );
 }
 
+let googleIdentityLoader;
+
+const PASSWORD_RULES = [
+  { id: "length", label: "8–72 characters", test: (value) => value.length >= 8 && value.length <= 72 },
+  { id: "lowercase", label: "One lowercase letter", test: (value) => /[a-z]/.test(value) },
+  { id: "uppercase", label: "One capital letter", test: (value) => /[A-Z]/.test(value) },
+  { id: "number", label: "One number", test: (value) => /\d/.test(value) },
+  { id: "special", label: "One special character", test: (value) => /[^A-Za-z0-9\s]/.test(value) },
+];
+
+function loadGoogleIdentity() {
+  if (window.google?.accounts?.id) return Promise.resolve(window.google);
+  if (googleIdentityLoader) return googleIdentityLoader;
+
+  googleIdentityLoader = new Promise((resolve, reject) => {
+    const existing = document.querySelector('script[data-study-google-identity="true"]');
+    const script = existing || document.createElement("script");
+    const handleLoad = () => window.google?.accounts?.id
+      ? resolve(window.google)
+      : reject(new Error("Google Sign-In did not initialize"));
+    script.addEventListener("load", handleLoad, { once: true });
+    script.addEventListener("error", () => reject(new Error("Google Sign-In could not be loaded")), { once: true });
+    if (!existing) {
+      script.src = "https://accounts.google.com/gsi/client";
+      script.async = true;
+      script.defer = true;
+      script.dataset.studyGoogleIdentity = "true";
+      document.head.appendChild(script);
+    }
+  });
+  return googleIdentityLoader;
+}
+
 function AuthScreen({ onAuthenticated }) {
   const [mode, setMode] = useState("demo");
   const [accountType, setAccountType] = useState("student");
   const [form, setForm] = useState({ full_name: "", email: "", password: "" });
   const [busy, setBusy] = useState(false);
+  const [googleReady, setGoogleReady] = useState(false);
+  const [verificationEmail, setVerificationEmail] = useState("");
+  const [verificationMessage, setVerificationMessage] = useState("");
+  const [verifyingLink, setVerifyingLink] = useState(false);
   const [error, setError] = useState("");
+  const googleButtonRef = useRef(null);
+  const googleHandlerRef = useRef(null);
+  const googleClientId = import.meta.env.VITE_GOOGLE_CLIENT_ID;
+  const passwordChecks = PASSWORD_RULES.map((rule) => ({
+    ...rule,
+    passed: rule.test(form.password),
+  }));
+  const passwordMeetsPolicy = passwordChecks.every((rule) => rule.passed);
 
-  async function submit(event) {
-    event.preventDefault();
+  function selectMode(nextMode) {
+    setMode(nextMode);
+    setError("");
+    setVerificationEmail("");
+    setVerificationMessage("");
+  }
+
+  function finishAuthentication(result) {
+    onAuthenticated({ token: result.access_token, user: result.user });
+  }
+
+  googleHandlerRef.current = async (credential) => {
     setBusy(true);
     setError("");
     try {
-      let user = null;
+      const result = await api.googleAuth({
+        credential,
+        account_type: accountType,
+        create_account: mode === "register",
+      });
+      finishAuthentication(result);
+    } catch (err) {
+      setError(err.message || "Unable to continue with Google");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  useEffect(() => {
+    const token = new URLSearchParams(window.location.search).get("verify_email");
+    if (!token) return;
+
+    setMode("login");
+    setVerifyingLink(true);
+    setError("");
+    api.verifyEmail(token)
+      .then((result) => {
+        const url = new URL(window.location.href);
+        url.searchParams.delete("verify_email");
+        window.history.replaceState(null, "", `${url.pathname}${url.search}${url.hash}`);
+        finishAuthentication(result);
+      })
+      .catch((err) => setError(err.message || "This verification link could not be used"))
+      .finally(() => setVerifyingLink(false));
+  }, []);
+
+  useEffect(() => {
+    if (!googleClientId) return undefined;
+    let cancelled = false;
+    loadGoogleIdentity()
+      .then((google) => {
+        if (cancelled) return;
+        google.accounts.id.initialize({
+          client_id: googleClientId,
+          callback: (response) => googleHandlerRef.current?.(response.credential),
+          ux_mode: "popup",
+          auto_select: false,
+        });
+        setGoogleReady(true);
+      })
+      .catch((err) => {
+        if (!cancelled) setError(err.message);
+      });
+    return () => { cancelled = true; };
+  }, [googleClientId]);
+
+  useEffect(() => {
+    if (!googleReady || mode === "demo" || !googleButtonRef.current) return;
+    googleButtonRef.current.replaceChildren();
+    window.google.accounts.id.renderButton(googleButtonRef.current, {
+      type: "standard",
+      theme: document.documentElement.dataset.theme === "dark" ? "filled_black" : "outline",
+      size: "large",
+      shape: "rectangular",
+      text: mode === "register" ? "signup_with" : "signin_with",
+      logo_alignment: "left",
+      width: Math.min(400, Math.max(240, googleButtonRef.current.clientWidth || 400)),
+    });
+  }, [accountType, googleReady, mode]);
+
+  async function submit(event) {
+    event.preventDefault();
+    if (mode === "register" && !passwordMeetsPolicy) {
+      setError("Use every password requirement shown below.");
+      return;
+    }
+    setBusy(true);
+    setError("");
+    try {
       if (mode === "register") {
-        user = await api.register({ ...form, account_type: accountType });
+        await api.register({ ...form, account_type: accountType });
+        setVerificationEmail(form.email);
+        setVerificationMessage(`We sent a verification link to ${form.email}.`);
+        return;
       }
       const result = await api.login({ email: form.email, password: form.password });
-      onAuthenticated({ token: result.access_token, user: result.user || user });
+      finishAuthentication(result);
     } catch (err) {
-      setError(err.message || "Unable to sign in");
+      if (mode === "login" && err instanceof ApiError && err.status === 403) {
+        setVerificationEmail(form.email);
+        setVerificationMessage("Your account exists, but its email still needs verification.");
+      } else if (mode === "register" && err instanceof ApiError && err.status === 503) {
+        setVerificationEmail(form.email);
+        setVerificationMessage("Your account was created, but email delivery needs attention. Try resending once the email service is available.");
+        setError(err.message);
+      } else {
+        setError(err.message || "Unable to sign in");
+      }
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function resendVerification() {
+    setBusy(true);
+    setError("");
+    try {
+      const result = await api.resendVerification(verificationEmail);
+      setVerificationMessage(result.message);
+    } catch (err) {
+      setError(err.message || "Unable to resend the verification email");
     } finally {
       setBusy(false);
     }
@@ -588,12 +741,20 @@ function AuthScreen({ onAuthenticated }) {
       <section className="auth-card-wrap">
         <div className="auth-card">
           <div className="auth-tabs">
-            <button className={mode === "demo" ? "active" : ""} onClick={() => setMode("demo")}>Preview demo</button>
-            <button className={mode === "login" ? "active" : ""} onClick={() => setMode("login")}>Sign in</button>
-            <button className={mode === "register" ? "active" : ""} onClick={() => setMode("register")}>Create account</button>
+            <button className={mode === "demo" ? "active" : ""} onClick={() => selectMode("demo")}>Preview demo</button>
+            <button className={mode === "login" ? "active" : ""} onClick={() => selectMode("login")}>Sign in</button>
+            <button className={mode === "register" ? "active" : ""} onClick={() => selectMode("register")}>Create account</button>
           </div>
           {mode === "demo" ? (
             <DemoExperience />
+          ) : verifyingLink ? (
+            <div className="auth-verification" aria-live="polite">
+              <span className="spinner" />
+              <p className="eyebrow">Verifying email</p>
+              <h2>Opening your workspace…</h2>
+              <p>We are checking the secure link.</p>
+              {error && <div className="form-error">{error}</div>}
+            </div>
           ) : (
             <>
               <div className="auth-heading">
@@ -601,24 +762,73 @@ function AuthScreen({ onAuthenticated }) {
                 <h2>{mode === "login" ? "Pick up where you left off." : accountType === "professional" ? "Turn your reference PDFs into a working map." : "Start your study space."}</h2>
                 <p>{mode === "login" ? "Your account type and workspace will open automatically." : accountType === "professional" ? "Organize PDFs in folders, then learn, map, annotate, and ask questions." : "Build a focused home for every subject."}</p>
               </div>
-              <form onSubmit={submit} className="stack-form">
-                {mode === "register" && <div className="auth-account-types" role="group" aria-label="Choose account type">
-                  <button type="button" className={accountType === "student" ? "active" : ""} onClick={() => setAccountType("student")}>
-                    <span><Icon name="book" size={17} />Student</span>
-                    <small>Semesters, subjects, assignments, practice, and revision.</small>
+              {verificationEmail ? (
+                <div className="auth-verification" aria-live="polite">
+                  <div className="auth-verification-icon"><Icon name="check" size={24} /></div>
+                  <p className="eyebrow">Check your inbox</p>
+                  <h2>Verify your email.</h2>
+                  <p>{verificationMessage}</p>
+                  {error && <div className="form-error">{error}</div>}
+                  <button className="primary-button full" type="button" disabled={busy} onClick={resendVerification}>
+                    {busy ? "Sending…" : "Resend verification email"}
+                    <Icon name="arrow" size={17} />
                   </button>
-                  <button type="button" className={accountType === "professional" ? "active" : ""} onClick={() => setAccountType("professional")}>
-                    <span><Icon name="layers" size={17} />Professional</span>
-                    <small>Folders, PDFs, global maps, learning, notes, and AI tutor.</small>
+                  <button className="auth-text-button" type="button" onClick={() => { setVerificationEmail(""); setVerificationMessage(""); }}>
+                    Back to sign in
                   </button>
-                </div>}
-                {mode === "register" && <label>Full name<input required value={form.full_name} onChange={(e) => setForm({ ...form, full_name: e.target.value })} placeholder="Your name" /></label>}
-                <label>Email<input required type="email" value={form.email} onChange={(e) => setForm({ ...form, email: e.target.value })} placeholder="you@example.com" /></label>
-                <label>Password<input required minLength="6" type="password" value={form.password} onChange={(e) => setForm({ ...form, password: e.target.value })} placeholder="At least 6 characters" /></label>
-                {error && <div className="form-error">{error}</div>}
-                <button className="primary-button full" disabled={busy}>{busy ? "Opening your space..." : mode === "login" ? "Enter study OS" : accountType === "professional" ? "Create professional space" : "Create study space"}<Icon name="arrow" size={17} /></button>
-              </form>
-              <p className="auth-footnote">Your study material stays scoped to your account.</p>
+                </div>
+              ) : (
+                <>
+                  {mode === "register" && <div className="auth-account-types" role="group" aria-label="Choose account type">
+                    <button type="button" className={accountType === "student" ? "active" : ""} onClick={() => setAccountType("student")}>
+                      <span><Icon name="book" size={17} />Student</span>
+                      <small>Semesters, subjects, assignments, practice, and revision.</small>
+                    </button>
+                    <button type="button" className={accountType === "professional" ? "active" : ""} onClick={() => setAccountType("professional")}>
+                      <span><Icon name="layers" size={17} />Professional</span>
+                      <small>Folders, PDFs, global maps, learning, notes, and AI tutor.</small>
+                    </button>
+                  </div>}
+                  {googleClientId && (
+                    <>
+                      <div className="google-signin-wrap" aria-busy={busy}>
+                        <div ref={googleButtonRef} className="google-signin-button" />
+                      </div>
+                      <div className="auth-divider"><span>or use email</span></div>
+                    </>
+                  )}
+                  <form onSubmit={submit} className="stack-form">
+                    {mode === "register" && <label>Full name<input required value={form.full_name} onChange={(e) => setForm({ ...form, full_name: e.target.value })} placeholder="Your name" autoComplete="name" /></label>}
+                    <label>Email<input required type="email" value={form.email} onChange={(e) => setForm({ ...form, email: e.target.value })} placeholder="you@example.com" autoComplete="email" /></label>
+                    <label>
+                      Password
+                      <input
+                        required
+                        minLength={mode === "register" ? 8 : 1}
+                        maxLength="72"
+                        type="password"
+                        value={form.password}
+                        onChange={(e) => setForm({ ...form, password: e.target.value })}
+                        placeholder={mode === "register" ? "Create a strong password" : "Your password"}
+                        autoComplete={mode === "register" ? "new-password" : "current-password"}
+                      />
+                    </label>
+                    {mode === "register" && (
+                      <div className="password-policy" aria-label="Password requirements">
+                        {passwordChecks.map((rule) => (
+                          <span key={rule.id} className={rule.passed ? "passed" : ""}>
+                            <Icon name={rule.passed ? "check" : "close"} size={12} />
+                            {rule.label}
+                          </span>
+                        ))}
+                      </div>
+                    )}
+                    {error && <div className="form-error">{error}</div>}
+                    <button className="primary-button full" disabled={busy || (mode === "register" && !passwordMeetsPolicy)}>{busy ? "Opening your space..." : mode === "login" ? "Enter study OS" : accountType === "professional" ? "Create professional space" : "Create study space"}<Icon name="arrow" size={17} /></button>
+                  </form>
+                </>
+              )}
+              <p className="auth-footnote">Email accounts must be verified. Google credentials are verified securely by the backend.</p>
             </>
           )}
         </div>

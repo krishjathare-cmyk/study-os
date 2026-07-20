@@ -18,6 +18,7 @@ from app.prompts import (
     VISUALIZATION_SYSTEM_PROMPT,
 )
 from app.retrieval_utils import tokenize
+from app.storage import WHISPER_MODEL_DIR
 
 BACKEND_ENV_PATH = Path(__file__).resolve().parents[1] / ".env"
 load_dotenv(dotenv_path=BACKEND_ENV_PATH, override=True)
@@ -178,6 +179,7 @@ def _get_local_transcription_model():
             model_name,
             device=device,
             compute_type=compute_type,
+            download_root=str(WHISPER_MODEL_DIR),
         )
     except Exception as error:
         raise LLMProviderError(

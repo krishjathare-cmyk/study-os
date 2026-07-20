@@ -23,6 +23,11 @@ class User(Base):
     email = Column(String, unique=True, index=True, nullable=False)
     hashed_password = Column(String, nullable=False)
     account_type = Column(String, nullable=False, default="student")
+    auth_provider = Column(String, nullable=False, default="password")
+    email_verified = Column(Boolean, nullable=False, default=False)
+    email_verified_at = Column(DateTime(timezone=True), nullable=True)
+    verification_sent_at = Column(DateTime(timezone=True), nullable=True)
+    google_subject = Column(String, unique=True, index=True, nullable=True)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
 
     semesters = relationship("Semester", back_populates="user")

@@ -1,18 +1,42 @@
+import re
 from datetime import datetime
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
+
+
+PASSWORD_POLICY_MESSAGE = (
+    "Password must be 8–72 characters and include a lowercase letter, "
+    "an uppercase letter, a number, and a special character"
+)
+
+
 class UserCreate(BaseModel):
     full_name: str
     email: str
-    password: str = Field(min_length=6, max_length=72)
+    password: str = Field(min_length=8, max_length=72)
     account_type: Literal["student", "professional"] = "student"
+
+    @field_validator("password")
+    @classmethod
+    def enforce_password_policy(cls, password: str) -> str:
+        if (
+            not re.search(r"[a-z]", password)
+            or not re.search(r"[A-Z]", password)
+            or not re.search(r"\d", password)
+            or not re.search(r"[^\w\s]", password)
+        ):
+            raise ValueError(PASSWORD_POLICY_MESSAGE)
+        return password
+
 
 class UserResponse(BaseModel):
     id: int
     full_name: str
     email: str
     account_type: Literal["student", "professional"]
+    auth_provider: Literal["password", "google"] = "password"
+    email_verified: bool = False
 
     model_config = ConfigDict(from_attributes=True)
 
@@ -20,6 +44,24 @@ class UserResponse(BaseModel):
 class LoginRequest(BaseModel):
     email: str
     password: str = Field(min_length=1, max_length=72)
+
+
+class EmailRequest(BaseModel):
+    email: str
+
+
+class EmailVerificationRequest(BaseModel):
+    token: str = Field(min_length=20)
+
+
+class GoogleAuthRequest(BaseModel):
+    credential: str = Field(min_length=20)
+    account_type: Literal["student", "professional"] = "student"
+    create_account: bool = False
+
+
+class MessageResponse(BaseModel):
+    message: str
 
 
 class TokenResponse(BaseModel):

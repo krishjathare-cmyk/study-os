@@ -1,22 +1,25 @@
 import os
 import sqlite3
+from pathlib import Path
+
+from dotenv import load_dotenv
 from sqlalchemy import create_engine, event
 from sqlalchemy.orm import declarative_base, sessionmaker
-from dotenv import load_dotenv
 
-load_dotenv()
+from app.storage import BACKEND_DIR, DATA_DIR
+
+load_dotenv(dotenv_path=BACKEND_DIR / ".env")
 
 DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///./study_assistant.db")
 is_sqlite = DATABASE_URL.startswith("sqlite")
 
-# Resolve the default SQLite file from the backend directory, not the shell's
-# current directory. This keeps Uvicorn launches from different folders on the
-# same database.
+# Resolve relative SQLite files from APP_DATA_DIR, not the current shell
+# directory. Setting APP_DATA_DIR to a mounted volume therefore persists the
+# database without requiring a separate DATABASE_URL override.
 if DATABASE_URL.startswith("sqlite:///./"):
     relative_path = DATABASE_URL[len("sqlite:///./"):]
-    backend_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    database_path = os.path.abspath(os.path.join(backend_dir, relative_path))
-    DATABASE_URL = f"sqlite:///{database_path.replace(os.sep, '/') }"
+    database_path = (DATA_DIR / Path(relative_path)).resolve()
+    DATABASE_URL = f"sqlite:///{database_path.as_posix()}"
 
 connect_args = {}
 if is_sqlite:

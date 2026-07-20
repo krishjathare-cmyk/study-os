@@ -1,5 +1,7 @@
 import os
+import secrets
 import shutil
+from datetime import datetime, timezone
 from uuid import uuid4
 from app.llm_provider import (
     LLMProviderError,
@@ -25,9 +27,19 @@ from app.vecor_store import (
 )
 from app.retrieval_utils import calculate_relevance_score
 from app import models, schemas
-from app.auth import create_access_token, get_current_user, hash_password, verify_password
+from app.auth import (
+    create_access_token,
+    create_email_verification_token,
+    decode_email_verification_token,
+    get_current_user,
+    hash_password,
+    verify_password,
+)
 from app.database import Base, engine, get_db
+from app.email_service import EmailDeliveryError, send_verification_email
+from app.google_identity import GoogleIdentityError, verify_google_id_token
 from app.pdf_utils import PDFExtractionError, extract_text_from_pdf
+from app.storage import UPLOAD_DIR
 from app.study_organizer import organize_document, prune_empty_nodes
 from app.study_workflow import (
     create_and_map_assignment_chunks,
@@ -65,6 +77,33 @@ if engine.dialect.name == "sqlite":
                 "ALTER TABLE users "
                 "ADD COLUMN account_type VARCHAR NOT NULL DEFAULT 'student'"
             )
+        if "auth_provider" not in user_columns:
+            connection.exec_driver_sql(
+                "ALTER TABLE users "
+                "ADD COLUMN auth_provider VARCHAR NOT NULL DEFAULT 'password'"
+            )
+        if "email_verified" not in user_columns:
+            # Accounts created before verification existed remain accessible.
+            connection.exec_driver_sql(
+                "ALTER TABLE users "
+                "ADD COLUMN email_verified BOOLEAN NOT NULL DEFAULT 1"
+            )
+        if "email_verified_at" not in user_columns:
+            connection.exec_driver_sql(
+                "ALTER TABLE users ADD COLUMN email_verified_at DATETIME"
+            )
+        if "verification_sent_at" not in user_columns:
+            connection.exec_driver_sql(
+                "ALTER TABLE users ADD COLUMN verification_sent_at DATETIME"
+            )
+        if "google_subject" not in user_columns:
+            connection.exec_driver_sql(
+                "ALTER TABLE users ADD COLUMN google_subject VARCHAR"
+            )
+        connection.exec_driver_sql(
+            "CREATE UNIQUE INDEX IF NOT EXISTS ix_users_google_subject "
+            "ON users (google_subject) WHERE google_subject IS NOT NULL"
+        )
         columns = {
             row[1]
             for row in connection.exec_driver_sql(
@@ -81,9 +120,6 @@ if engine.dialect.name == "sqlite":
                 "ALTER TABLE node_learning_contents "
                 "ADD COLUMN structured_sections TEXT NOT NULL DEFAULT '[]'"
             )
-
-UPLOAD_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "uploads")
-os.makedirs(UPLOAD_DIR, exist_ok=True)
 
 UPLOAD_RETRY_MESSAGE = (
     "The PDF could not be fully processed into chunks. "
@@ -329,40 +365,81 @@ def health_check():
         "status": "ok"
     }
 
+
+def _normalized_email(email: str) -> str:
+    return email.strip().lower()
+
+
+def _create_initial_workspace(
+    db: Session,
+    user: models.User,
+    account_type: str,
+) -> None:
+    if account_type == "professional":
+        db.add(
+            models.Semester(
+                name="Professional library",
+                description="Folders and PDF knowledge maps",
+                user_id=user.id,
+            )
+        )
+
+
+def _issue_session(user: models.User) -> dict:
+    return {
+        "access_token": create_access_token(data={"sub": str(user.id)}),
+        "token_type": "bearer",
+        "user": user,
+    }
+
+
+def _deliver_verification(user: models.User) -> None:
+    token = create_email_verification_token(user.id, user.email)
+    send_verification_email(user.email, user.full_name, token)
+
+
 @app.post("/register", response_model=schemas.UserResponse, status_code=status.HTTP_201_CREATED)
 def register_user(
     user: schemas.UserCreate,
     db: Session = Depends(get_db)
 ):
+    email = _normalized_email(user.email)
     existing_user = db.query(models.User).filter(
-        models.User.email == user.email
+        models.User.email == email
     ).first()
 
     if existing_user:
         raise HTTPException(
             status_code=400,
-            detail="Email already registered"
+            detail="Email already registered. Sign in or resend verification."
         )
 
     new_user = models.User(
-        full_name=user.full_name,
-        email=user.email,
+        full_name=user.full_name.strip(),
+        email=email,
         hashed_password=hash_password(user.password),
         account_type=user.account_type,
+        auth_provider="password",
+        email_verified=False,
+        verification_sent_at=datetime.now(timezone.utc),
     )
 
     db.add(new_user)
     db.flush()
-    if user.account_type == "professional":
-        db.add(
-            models.Semester(
-                name="Professional library",
-                description="Folders and PDF knowledge maps",
-                user_id=new_user.id,
-            )
-        )
+    _create_initial_workspace(db, new_user, user.account_type)
     db.commit()
     db.refresh(new_user)
+
+    try:
+        _deliver_verification(new_user)
+    except EmailDeliveryError as error:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=(
+                "Your account was created, but the verification email could "
+                "not be sent. Use resend verification after email is configured."
+            ),
+        ) from error
 
     return new_user
 
@@ -372,8 +449,9 @@ def login_user(
     login_data: schemas.LoginRequest,
     db: Session = Depends(get_db)
 ):
+    email = _normalized_email(login_data.email)
     user = db.query(models.User).filter(
-        models.User.email == login_data.email
+        models.User.email == email
     ).first()
 
     if user is None:
@@ -388,15 +466,174 @@ def login_user(
             detail="Invalid email or password"
         )
 
-    access_token = create_access_token(
-        data={"sub": str(user.id)}
-    )
+    if not user.email_verified:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Verify your email address before signing in",
+        )
 
-    return {
-        "access_token": access_token,
-        "token_type": "bearer",
-        "user": user,
-    }
+    return _issue_session(user)
+
+
+@app.post("/verify-email", response_model=schemas.TokenResponse)
+def verify_email_address(
+    verification: schemas.EmailVerificationRequest,
+    db: Session = Depends(get_db),
+):
+    try:
+        user_id, email = decode_email_verification_token(verification.token)
+    except ValueError as error:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(error),
+        ) from error
+
+    user = db.query(models.User).filter(
+        models.User.id == user_id,
+        models.User.email == email,
+    ).first()
+    if user is None:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Verification link is invalid",
+        )
+
+    if not user.email_verified:
+        user.email_verified = True
+        user.email_verified_at = datetime.now(timezone.utc)
+        db.commit()
+        db.refresh(user)
+
+    return _issue_session(user)
+
+
+@app.post("/resend-verification", response_model=schemas.MessageResponse)
+def resend_email_verification(
+    request: schemas.EmailRequest,
+    db: Session = Depends(get_db),
+):
+    generic_message = (
+        "If an unverified account exists, a new verification email has been sent."
+    )
+    email = _normalized_email(request.email)
+    user = db.query(models.User).filter(models.User.email == email).first()
+    if user is None or user.email_verified:
+        return {"message": generic_message}
+
+    now = datetime.now(timezone.utc)
+    sent_at = user.verification_sent_at
+    if sent_at is not None:
+        if sent_at.tzinfo is None:
+            sent_at = sent_at.replace(tzinfo=timezone.utc)
+        if (now - sent_at).total_seconds() < 60:
+            return {"message": generic_message}
+
+    user.verification_sent_at = now
+    db.commit()
+    db.refresh(user)
+    try:
+        _deliver_verification(user)
+    except EmailDeliveryError as error:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="The verification email could not be sent. Try again later.",
+        ) from error
+
+    return {"message": generic_message}
+
+
+@app.post("/auth/google", response_model=schemas.TokenResponse)
+def authenticate_with_google(
+    request: schemas.GoogleAuthRequest,
+    db: Session = Depends(get_db),
+):
+    try:
+        claims = verify_google_id_token(request.credential)
+    except GoogleIdentityError as error:
+        configuration_error = any(
+            word in str(error).lower()
+            for word in ("configured", "installed")
+        )
+        raise HTTPException(
+            status_code=(
+                status.HTTP_503_SERVICE_UNAVAILABLE
+                if configuration_error
+                else status.HTTP_401_UNAUTHORIZED
+            ),
+            detail=str(error),
+        ) from error
+
+    google_subject = str(claims["sub"])
+    email = _normalized_email(str(claims["email"]))
+    user = db.query(models.User).filter(
+        models.User.google_subject == google_subject
+    ).first()
+
+    if user is None:
+        email_user = db.query(models.User).filter(
+            models.User.email == email
+        ).first()
+        if email_user is not None:
+            if email_user.google_subject:
+                raise HTTPException(
+                    status_code=status.HTTP_409_CONFLICT,
+                    detail="This email is linked to a different Google account",
+                )
+            google_is_email_authority = (
+                email.endswith("@gmail.com")
+                or bool(claims.get("hd"))
+            )
+            if email_user.email_verified and not google_is_email_authority:
+                raise HTTPException(
+                    status_code=status.HTTP_409_CONFLICT,
+                    detail=(
+                        "An account already exists with this email. Sign in "
+                        "with your password first to connect Google."
+                    ),
+                )
+
+            if not email_user.email_verified:
+                # This password account never proved ownership of the address.
+                # Google has now done so, so invalidate the unverified password.
+                email_user.hashed_password = hash_password(
+                    secrets.token_urlsafe(32)
+                )
+                email_user.auth_provider = "google"
+            email_user.google_subject = google_subject
+            email_user.email_verified = True
+            email_user.email_verified_at = datetime.now(timezone.utc)
+            user = email_user
+
+    if user is None:
+        if not request.create_account:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=(
+                    "No account uses this Google email. Choose Create account "
+                    "and select Student or Professional first."
+                ),
+            )
+
+        user = models.User(
+            full_name=(claims.get("name") or email.split("@")[0]).strip(),
+            email=email,
+            hashed_password=hash_password(secrets.token_urlsafe(32)),
+            account_type=request.account_type,
+            auth_provider="google",
+            email_verified=True,
+            email_verified_at=datetime.now(timezone.utc),
+            google_subject=google_subject,
+        )
+        db.add(user)
+        db.flush()
+        _create_initial_workspace(db, user, request.account_type)
+    else:
+        user.email_verified = True
+        user.email_verified_at = user.email_verified_at or datetime.now(timezone.utc)
+
+    db.commit()
+    db.refresh(user)
+    return _issue_session(user)
 
 
 @app.get("/me", response_model=schemas.UserResponse)

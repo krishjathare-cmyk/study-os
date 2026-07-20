@@ -21,7 +21,10 @@ async function request(path, options = {}, token) {
     : await response.text();
 
   if (!response.ok) {
-    const detail = typeof payload === "object" ? payload.detail : payload;
+    const rawDetail = typeof payload === "object" ? payload.detail : payload;
+    const detail = Array.isArray(rawDetail)
+      ? rawDetail.map((item) => item?.msg || String(item)).join(" ")
+      : rawDetail;
     throw new ApiError(detail || "Something went wrong", response.status);
   }
   return payload;
@@ -51,6 +54,9 @@ const json = (method, path, body, token) => request(path, {
 export const api = {
   login: (body) => json("POST", "/login", body),
   register: (body) => json("POST", "/register", body),
+  verifyEmail: (token) => json("POST", "/verify-email", { token }),
+  resendVerification: (email) => json("POST", "/resend-verification", { email }),
+  googleAuth: (body) => json("POST", "/auth/google", body),
   me: (token) => request("/me", {}, token),
   semesters: (token) => request("/semesters", {}, token),
   createSemester: (body, token) => json("POST", "/semesters", body, token),
