@@ -1,15 +1,18 @@
 from datetime import datetime
+from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 class UserCreate(BaseModel):
     full_name: str
     email: str
     password: str = Field(min_length=6, max_length=72)
+    account_type: Literal["student", "professional"] = "student"
 
 class UserResponse(BaseModel):
     id: int
     full_name: str
     email: str
+    account_type: Literal["student", "professional"]
 
     model_config = ConfigDict(from_attributes=True)
 
@@ -22,6 +25,7 @@ class LoginRequest(BaseModel):
 class TokenResponse(BaseModel):
     access_token: str
     token_type: str
+    user: UserResponse
 
 class SemesterCreate(BaseModel):
     name: str
@@ -90,6 +94,12 @@ class StudyNodeChunkResponse(BaseModel):
     chunk_text: str
 
 
+class StudyNodeSourcePage(BaseModel):
+    document_id: int
+    filename: str
+    page_number: int
+
+
 class StudyNodeDetail(BaseModel):
     id: int
     subject_id: int
@@ -102,6 +112,7 @@ class StudyNodeDetail(BaseModel):
     confidence: float
     breadcrumb: list[StudyNodeSummary]
     chunks: list[StudyNodeChunkResponse]
+    source_pages: list[StudyNodeSourcePage] = Field(default_factory=list)
 
 
 class OrganizeSubjectRequest(BaseModel):
@@ -221,6 +232,7 @@ class LearningContentResponse(BaseModel):
     analogy: str
     worked_example: str
     real_life_example: str
+    structured_sections: list[dict] = Field(default_factory=list)
     formulas: list[FormulaItem]
     key_points: list[str]
     conceptual_questions: list[str]
@@ -245,6 +257,41 @@ class StudentNoteResponse(BaseModel):
     updated_at: datetime
 
     model_config = ConfigDict(from_attributes=True)
+
+
+class StructuredNoteSection(BaseModel):
+    heading: str = Field(min_length=1, max_length=240)
+    summary: str = Field(default="", max_length=4000)
+    points: list[str] = Field(default_factory=list, max_length=30)
+
+
+class PromptNoteData(BaseModel):
+    overview: str = Field(default="", max_length=8000)
+    sections: list[StructuredNoteSection] = Field(default_factory=list, max_length=20)
+    key_points: list[str] = Field(default_factory=list, max_length=40)
+    questions: list[str] = Field(default_factory=list, max_length=30)
+
+
+class NodeNoteDocumentUpdate(BaseModel):
+    notes: PromptNoteData
+
+
+class NodeNoteDocumentResponse(BaseModel):
+    node_id: int
+    notes: PromptNoteData
+    version: int
+    saved: bool
+    updated_at: datetime | None = None
+
+
+class PromptNoteComposeRequest(BaseModel):
+    instruction: str = Field(min_length=1, max_length=4000)
+    notes: PromptNoteData
+
+
+class PromptNoteComposeResponse(BaseModel):
+    notes: PromptNoteData
+    message: str
 
 
 class NodeChatRequest(BaseModel):
@@ -277,6 +324,10 @@ class RevisionResponse(BaseModel):
     due_at: datetime
     status: str
     days_overdue: int
+    revision_note: str = ""
+    revision_points: list[str] = Field(default_factory=list)
+    practice_set_id: int | None = None
+    practice_questions: list[dict] = Field(default_factory=list)
 
 
 class ProgressUpdateResponse(BaseModel):

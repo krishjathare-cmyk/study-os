@@ -1,5 +1,7 @@
+import os
 import re
 from datetime import datetime, timedelta
+from functools import lru_cache
 from math import sqrt
 
 from sqlalchemy.orm import Session
@@ -85,6 +87,78 @@ def node_context(
     return "\n\n".join(parts)[:max_chars]
 
 
+@lru_cache(maxsize=32)
+def _cached_pdf_pages(file_path: str, modified_at_ns: int) -> tuple[str, ...]:
+    del modified_at_ns
+    return tuple(extract_pdf_pages(file_path))
+
+
+def node_source_pages(
+    db: Session,
+    node: models.StudyNode,
+    limit: int = 4,
+) -> list[dict]:
+    """Locate the most relevant original PDF page for each document linked to a node."""
+    rows = (
+        db.query(models.DocumentChunk, models.Document)
+        .join(
+            models.StudyNodeChunk,
+            models.StudyNodeChunk.chunk_id == models.DocumentChunk.id,
+        )
+        .join(models.Document, models.Document.id == models.DocumentChunk.document_id)
+        .filter(models.StudyNodeChunk.node_id == node.id)
+        .order_by(models.DocumentChunk.document_id, models.DocumentChunk.chunk_index)
+        .all()
+    )
+    grouped: dict[int, dict] = {}
+    for chunk, document in rows:
+        entry = grouped.setdefault(document.id, {"document": document, "chunks": []})
+        entry["chunks"].append(chunk.chunk_text)
+
+    matches = []
+    for entry in grouped.values():
+        document = entry["document"]
+        if not document.file_path or not os.path.isfile(document.file_path):
+            continue
+        try:
+            modified_at_ns = os.stat(document.file_path).st_mtime_ns
+            pages = _cached_pdf_pages(document.file_path, modified_at_ns)
+        except (OSError, PDFExtractionError):
+            continue
+        if not pages:
+            continue
+
+        query = f"{node.title}\n" + "\n".join(entry["chunks"])
+        ranked_pages = [
+            (calculate_relevance_score(query[:16000], page_text), page_number)
+            for page_number, page_text in enumerate(pages, start=1)
+        ]
+        score, page_number = max(ranked_pages, key=lambda item: (item[0], -item[1]))
+        matches.append(
+            {
+                "document_id": document.id,
+                "filename": document.filename,
+                "page_number": page_number,
+                "_score": score,
+            }
+        )
+
+    matches.sort(key=lambda item: (-item["_score"], item["filename"].lower()))
+    sources = []
+    seen_filenames = set()
+    for match in matches:
+        filename_key = match["filename"].casefold()
+        if filename_key in seen_filenames:
+            continue
+        seen_filenames.add(filename_key)
+        sources.append(
+            {key: value for key, value in match.items() if key != "_score"}
+        )
+        if len(sources) >= limit:
+            break
+    return sources
+
+
 def _source_pages_for_question(
     db: Session,
     node: models.StudyNode,
@@ -133,6 +207,43 @@ def _sentences(text: str) -> list[str]:
     ]
 
 
+def _normalize_structured_sections(
+    candidate: object,
+    summary: str,
+    key_points: list[str],
+) -> list[dict]:
+    if not isinstance(candidate, list):
+        candidate = []
+    sections = []
+    for item in candidate[:8]:
+        if not isinstance(item, dict):
+            continue
+        heading = " ".join(str(item.get("heading") or "").split())[:120]
+        section_summary = " ".join(str(item.get("summary") or "").split())[:500]
+        points = [
+            " ".join(str(point).split())[:600]
+            for point in (item.get("points") or [])[:8]
+            if str(point).strip()
+        ]
+        if heading and (section_summary or points):
+            sections.append(
+                {
+                    "heading": heading,
+                    "summary": section_summary,
+                    "points": points,
+                }
+            )
+    if sections:
+        return sections
+    return [
+        {
+            "heading": "Core idea",
+            "summary": summary[:500],
+            "points": key_points[:8],
+        }
+    ]
+
+
 def _fallback_learning_content(node: models.StudyNode, context: str) -> dict:
     sentences = _sentences(context)
     summary = " ".join(sentences[:5])[:1800]
@@ -163,6 +274,13 @@ def _fallback_learning_content(node: models.StudyNode, context: str) -> dict:
             "everyday activity or device. Identify what changes, what causes the "
             "change, and what result you observe."
         ),
+        "structured_sections": [
+            {
+                "heading": "Core idea",
+                "summary": summary[:500],
+                "points": key_points[:8],
+            }
+        ],
         "formulas": formulas,
         "key_points": key_points,
         "conceptual_questions": [
@@ -297,6 +415,11 @@ def regenerate_learning_content(
     context = node_context(db, node)
     generated = generate_node_learning_content(node_path(node), context)
     payload = generated or _fallback_learning_content(node, context)
+    payload["structured_sections"] = _normalize_structured_sections(
+        payload.get("structured_sections"),
+        payload.get("explanation", ""),
+        payload.get("key_points", []),
+    )
     visualization = _normalize_visualization(
         node,
         payload.pop("visualization", None),
@@ -312,6 +435,7 @@ def regenerate_learning_content(
         content.analogy = payload["analogy"]
         content.worked_example = payload["worked_example"]
         content.real_life_example = payload["real_life_example"]
+        content.structured_sections = payload["structured_sections"]
         content.formulas = payload["formulas"]
         content.key_points = payload["key_points"]
         content.conceptual_questions = payload["conceptual_questions"]

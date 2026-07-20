@@ -3,6 +3,7 @@ import shutil
 from uuid import uuid4
 from app.llm_provider import (
     LLMProviderError,
+    edit_structured_notes,
     generate_lecture_notes,
     generate_strict_answer,
     reset_request_llm_provider,
@@ -11,6 +12,8 @@ from app.llm_provider import (
 )
 from fastapi import Depends, FastAPI, File, HTTPException, UploadFile, status
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse
+from pydantic import ValidationError
 from sqlalchemy.orm import Session
 from app.vecor_store import (
     VectorStoreError,
@@ -33,7 +36,10 @@ from app.study_workflow import (
     generate_practice_for_assignment,
     grade_practice_set,
     grade_topic_test,
+    node_context,
     node_chunk_rows,
+    node_path,
+    node_source_pages,
     pregenerate_topic_tests_for_nodes,
     public_questions,
     regenerate_learning_content,
@@ -48,6 +54,17 @@ Base.metadata.create_all(bind=engine)
 # Add fields introduced after the first SQLite database was created.
 if engine.dialect.name == "sqlite":
     with engine.begin() as connection:
+        user_columns = {
+            row[1]
+            for row in connection.exec_driver_sql(
+                "PRAGMA table_info(users)"
+            )
+        }
+        if "account_type" not in user_columns:
+            connection.exec_driver_sql(
+                "ALTER TABLE users "
+                "ADD COLUMN account_type VARCHAR NOT NULL DEFAULT 'student'"
+            )
         columns = {
             row[1]
             for row in connection.exec_driver_sql(
@@ -58,6 +75,11 @@ if engine.dialect.name == "sqlite":
             connection.exec_driver_sql(
                 "ALTER TABLE node_learning_contents "
                 "ADD COLUMN real_life_example TEXT NOT NULL DEFAULT ''"
+            )
+        if "structured_sections" not in columns:
+            connection.exec_driver_sql(
+                "ALTER TABLE node_learning_contents "
+                "ADD COLUMN structured_sections TEXT NOT NULL DEFAULT '[]'"
             )
 
 UPLOAD_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "uploads")
@@ -231,6 +253,14 @@ def get_owned_subject(
     return subject
 
 
+def require_student_account(current_user: models.User):
+    if current_user.account_type != "student":
+        raise HTTPException(
+            status_code=403,
+            detail="This feature is available only in student workspaces",
+        )
+
+
 def get_owned_node(
     db: Session,
     subject_id: int,
@@ -317,10 +347,20 @@ def register_user(
     new_user = models.User(
         full_name=user.full_name,
         email=user.email,
-        hashed_password=hash_password(user.password)
+        hashed_password=hash_password(user.password),
+        account_type=user.account_type,
     )
 
     db.add(new_user)
+    db.flush()
+    if user.account_type == "professional":
+        db.add(
+            models.Semester(
+                name="Professional library",
+                description="Folders and PDF knowledge maps",
+                user_id=new_user.id,
+            )
+        )
     db.commit()
     db.refresh(new_user)
 
@@ -354,8 +394,17 @@ def login_user(
 
     return {
         "access_token": access_token,
-        "token_type": "bearer"
+        "token_type": "bearer",
+        "user": user,
     }
+
+
+@app.get("/me", response_model=schemas.UserResponse)
+def get_current_account(
+    current_user: models.User = Depends(get_current_user),
+):
+    return current_user
+
 
 @app.post("/semesters", response_model=schemas.SemesterResponse)
 def create_semester(
@@ -481,6 +530,7 @@ def delete_subject(
 
     if node_ids:
         db.query(models.StudentNote).filter(models.StudentNote.node_id.in_(node_ids)).delete(synchronize_session=False)
+        db.query(models.NodeNoteDocument).filter(models.NodeNoteDocument.node_id.in_(node_ids)).delete(synchronize_session=False)
         db.query(models.NodeProgress).filter(models.NodeProgress.node_id.in_(node_ids)).delete(synchronize_session=False)
         db.query(models.RevisionSchedule).filter(models.RevisionSchedule.node_id.in_(node_ids)).delete(synchronize_session=False)
         db.query(models.PracticeSet).filter(models.PracticeSet.node_id.in_(node_ids)).delete(synchronize_session=False)
@@ -610,12 +660,13 @@ def upload_document(
         db.commit()
 
         regenerate_learning_for_nodes(db, organization.subtopic_ids)
-        regenerate_study_practice_for_nodes(db, organization.subtopic_ids)
-        pregenerate_topic_tests_for_nodes(
-            db,
-            current_user.id,
-            organization.subtopic_ids,
-        )
+        if current_user.account_type == "student":
+            regenerate_study_practice_for_nodes(db, organization.subtopic_ids)
+            pregenerate_topic_tests_for_nodes(
+                db,
+                current_user.id,
+                organization.subtopic_ids,
+            )
         db.commit()
         db.refresh(document)
 
@@ -654,6 +705,31 @@ def get_subject_documents(
     return db.query(models.Document).filter(
         models.Document.subject_id == subject_id
     ).order_by(models.Document.created_at.desc()).all()
+
+
+@app.get("/subjects/{subject_id}/documents/{document_id}/file")
+def view_document_file(
+    subject_id: int,
+    document_id: int,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(get_current_user),
+):
+    get_owned_subject(db, subject_id, current_user.id)
+    document = db.query(models.Document).filter(
+        models.Document.id == document_id,
+        models.Document.subject_id == subject_id,
+    ).first()
+    if document is None:
+        raise HTTPException(status_code=404, detail="Study material not found")
+    if not os.path.isfile(document.file_path):
+        raise HTTPException(status_code=404, detail="PDF file not found")
+
+    return FileResponse(
+        path=document.file_path,
+        media_type="application/pdf",
+        filename=document.filename,
+        content_disposition_type="inline",
+    )
 
 
 @app.delete("/subjects/{subject_id}/documents/{document_id}")
@@ -717,6 +793,7 @@ def create_lecture(
     db: Session = Depends(get_db),
     current_user: models.User = Depends(get_current_user),
 ):
+    require_student_account(current_user)
     get_owned_subject(db, subject_id, current_user.id)
     latest = db.query(models.Lecture).filter(
         models.Lecture.subject_id == subject_id,
@@ -745,6 +822,7 @@ def get_subject_lectures(
     db: Session = Depends(get_db),
     current_user: models.User = Depends(get_current_user),
 ):
+    require_student_account(current_user)
     get_owned_subject(db, subject_id, current_user.id)
     return db.query(models.Lecture).filter(
         models.Lecture.subject_id == subject_id,
@@ -761,6 +839,7 @@ def get_lecture(
     db: Session = Depends(get_db),
     current_user: models.User = Depends(get_current_user),
 ):
+    require_student_account(current_user)
     return get_owned_lecture(db, subject_id, lecture_id, current_user.id)
 
 
@@ -775,6 +854,7 @@ def update_lecture_notes(
     db: Session = Depends(get_db),
     current_user: models.User = Depends(get_current_user),
 ):
+    require_student_account(current_user)
     lecture = get_owned_lecture(db, subject_id, lecture_id, current_user.id)
     if lecture.status != "ready":
         raise HTTPException(status_code=400, detail="Lecture notes are not ready yet")
@@ -791,6 +871,7 @@ def delete_lecture(
     db: Session = Depends(get_db),
     current_user: models.User = Depends(get_current_user),
 ):
+    require_student_account(current_user)
     lecture = get_owned_lecture(db, subject_id, lecture_id, current_user.id)
     db.delete(lecture)
     db.commit()
@@ -810,6 +891,7 @@ def transcribe_lecture_chunk(
     db: Session = Depends(get_db),
     current_user: models.User = Depends(get_current_user),
 ):
+    require_student_account(current_user)
     lecture = get_owned_lecture(db, subject_id, lecture_id, current_user.id)
     if lecture.status == "ready":
         raise HTTPException(status_code=409, detail="Lecture has already been finalized")
@@ -861,6 +943,7 @@ def finalize_lecture(
     db: Session = Depends(get_db),
     current_user: models.User = Depends(get_current_user),
 ):
+    require_student_account(current_user)
     lecture = get_owned_lecture(db, subject_id, lecture_id, current_user.id)
     if not lecture.transcript.strip():
         raise HTTPException(status_code=400, detail="No transcript has been captured yet")
@@ -914,12 +997,13 @@ def organize_subject_documents(
 
     prune_empty_nodes(db, subject_id)
     regenerate_learning_for_nodes(db, sorted(content_node_ids))
-    regenerate_study_practice_for_nodes(db, sorted(content_node_ids))
-    pregenerate_topic_tests_for_nodes(
-        db,
-        current_user.id,
-        sorted(content_node_ids),
-    )
+    if current_user.account_type == "student":
+        regenerate_study_practice_for_nodes(db, sorted(content_node_ids))
+        pregenerate_topic_tests_for_nodes(
+            db,
+            current_user.id,
+            sorted(content_node_ids),
+        )
     db.commit()
 
     if request.reindex_vectors:
@@ -1076,6 +1160,7 @@ def get_study_node_detail(
         "confidence": node.confidence,
         "breadcrumb": breadcrumb,
         "chunks": chunks,
+        "source_pages": node_source_pages(db, node),
     }
 
 @app.post("/subjects/{subject_id}/retrieve", response_model=list[schemas.RetrievalResultResponse])
@@ -1173,7 +1258,12 @@ def chat_with_subject_documents(
     }
 
 
-def _revision_payload(revision: models.RevisionSchedule, node_title: str) -> dict:
+def _revision_payload(
+    revision: models.RevisionSchedule,
+    node_title: str,
+    learning: models.NodeLearningContent | None = None,
+    practice: models.PracticeSet | None = None,
+) -> dict:
     overdue = days_overdue(revision.due_at)
     is_past_due = revision.due_at < utc_now()
     display_status = (
@@ -1187,6 +1277,12 @@ def _revision_payload(revision: models.RevisionSchedule, node_title: str) -> dic
         "due_at": revision.due_at,
         "status": display_status,
         "days_overdue": overdue,
+        "revision_note": (learning.explanation or "")[:500] if learning else "",
+        "revision_points": (learning.key_points or [])[:4] if learning else [],
+        "practice_set_id": practice.id if practice else None,
+        "practice_questions": (
+            public_questions((practice.questions or [])[:3]) if practice else []
+        ),
     }
 
 
@@ -1238,6 +1334,7 @@ def upload_assignment(
     db: Session = Depends(get_db),
     current_user: models.User = Depends(get_current_user),
 ):
+    require_student_account(current_user)
     get_owned_subject(db, subject_id, current_user.id)
     if not file.filename or not file.filename.lower().endswith(".pdf"):
         raise HTTPException(status_code=400, detail="Only PDF files are allowed")
@@ -1346,6 +1443,7 @@ def get_assignments(
     db: Session = Depends(get_db),
     current_user: models.User = Depends(get_current_user),
 ):
+    require_student_account(current_user)
     subject = get_owned_subject(db, subject_id, current_user.id)
     output = []
     for assignment in sorted(
@@ -1384,6 +1482,7 @@ def get_assignment_detail(
     db: Session = Depends(get_db),
     current_user: models.User = Depends(get_current_user),
 ):
+    require_student_account(current_user)
     get_owned_subject(db, subject_id, current_user.id)
     assignment = db.query(models.AssignmentDocument).filter_by(
         id=assignment_id,
@@ -1437,8 +1536,8 @@ def get_node_learning_content(
             detail="Learning content has not been generated for this node",
         )
     content = node.learning_content
-    if not content.real_life_example:
-        # Upgrade older content once so the new card is not left empty.
+    if not content.real_life_example or not content.structured_sections:
+        # Upgrade older content once so the structured notes are populated.
         content = regenerate_learning_content(db, node)
         db.commit()
         db.refresh(content)
@@ -1450,6 +1549,7 @@ def get_node_learning_content(
         "analogy": content.analogy,
         "worked_example": content.worked_example,
         "real_life_example": content.real_life_example,
+        "structured_sections": content.structured_sections,
         "formulas": content.formulas,
         "key_points": content.key_points,
         "conceptual_questions": content.conceptual_questions,
@@ -1483,12 +1583,73 @@ def generate_node_content(
         "analogy": content.analogy,
         "worked_example": content.worked_example,
         "real_life_example": content.real_life_example,
+        "structured_sections": content.structured_sections,
         "formulas": content.formulas,
         "key_points": content.key_points,
         "conceptual_questions": content.conceptual_questions,
         "visualization": _visualization_payload(visualization),
         "version": content.version,
         "generated_at": content.generated_at,
+    }
+
+
+def _initial_prompt_note_data(node: models.StudyNode) -> dict:
+    content = node.learning_content
+    if content is None:
+        return {
+            "overview": f"Build your notes for {node.title}.",
+            "sections": [],
+            "key_points": [],
+            "questions": [],
+        }
+
+    sections = []
+    for index, section in enumerate(content.structured_sections or []):
+        if not isinstance(section, dict):
+            continue
+        heading = str(section.get("heading") or f"Section {index + 1}").strip()
+        points = [
+            str(point).strip()
+            for point in section.get("points", [])
+            if str(point).strip()
+        ]
+        sections.append(
+            {
+                "heading": heading[:240],
+                "summary": str(section.get("summary") or "").strip()[:4000],
+                "points": points[:30],
+            }
+        )
+    if not sections and content.key_points:
+        sections.append(
+            {
+                "heading": "Core ideas",
+                "summary": f"The essential ideas for {node.title}.",
+                "points": [str(point) for point in content.key_points[:30]],
+            }
+        )
+
+    return {
+        "overview": content.explanation,
+        "sections": sections[:20],
+        "key_points": [str(point) for point in (content.key_points or [])[:40]],
+        "questions": [
+            str(question)
+            for question in (content.conceptual_questions or [])[:30]
+        ],
+    }
+
+
+def _node_note_document_payload(
+    node: models.StudyNode,
+    document: models.NodeNoteDocument | None,
+) -> dict:
+    return {
+        "node_id": node.id,
+        "notes": document.notes if document is not None else _initial_prompt_note_data(node),
+        "version": document.version if document is not None else 0,
+        "saved": document is not None,
+        "updated_at": document.updated_at if document is not None else None,
     }
 
 
@@ -1531,6 +1692,104 @@ def create_student_note(
     db.commit()
     db.refresh(note)
     return note
+
+
+@app.get(
+    "/subjects/{subject_id}/study-nodes/{node_id}/note-document",
+    response_model=schemas.NodeNoteDocumentResponse,
+)
+def get_node_note_document(
+    subject_id: int,
+    node_id: int,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(get_current_user),
+):
+    node = get_owned_node(db, subject_id, node_id, current_user.id)
+    if node.node_type != "subtopic":
+        raise HTTPException(
+            status_code=400,
+            detail="Structured notes are available for subtopics",
+        )
+    document = db.query(models.NodeNoteDocument).filter_by(
+        user_id=current_user.id,
+        node_id=node_id,
+    ).first()
+    return _node_note_document_payload(node, document)
+
+
+@app.put(
+    "/subjects/{subject_id}/study-nodes/{node_id}/note-document",
+    response_model=schemas.NodeNoteDocumentResponse,
+)
+def save_node_note_document(
+    subject_id: int,
+    node_id: int,
+    request: schemas.NodeNoteDocumentUpdate,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(get_current_user),
+):
+    node = get_owned_node(db, subject_id, node_id, current_user.id)
+    if node.node_type != "subtopic":
+        raise HTTPException(
+            status_code=400,
+            detail="Structured notes are available for subtopics",
+        )
+    document = db.query(models.NodeNoteDocument).filter_by(
+        user_id=current_user.id,
+        node_id=node_id,
+    ).first()
+    if document is None:
+        document = models.NodeNoteDocument(
+            user_id=current_user.id,
+            node_id=node_id,
+            notes=request.notes.model_dump(),
+            version=1,
+        )
+        db.add(document)
+    else:
+        document.notes = request.notes.model_dump()
+        document.version += 1
+    db.commit()
+    db.refresh(document)
+    return _node_note_document_payload(node, document)
+
+
+@app.post(
+    "/subjects/{subject_id}/study-nodes/{node_id}/note-document/compose",
+    response_model=schemas.PromptNoteComposeResponse,
+)
+def compose_node_note_document(
+    subject_id: int,
+    node_id: int,
+    request: schemas.PromptNoteComposeRequest,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(get_current_user),
+):
+    node = get_owned_node(db, subject_id, node_id, current_user.id)
+    if node.node_type != "subtopic":
+        raise HTTPException(
+            status_code=400,
+            detail="Structured notes are available for subtopics",
+        )
+    try:
+        result = edit_structured_notes(
+            node_path(node),
+            node_context(db, node),
+            request.notes.model_dump(),
+            request.instruction,
+        )
+        validated_notes = schemas.PromptNoteData.model_validate(result["notes"])
+    except LLMProviderError as error:
+        raise HTTPException(status_code=502, detail=str(error)) from error
+    except (KeyError, ValidationError) as error:
+        raise HTTPException(
+            status_code=502,
+            detail="The AI notes editor returned an invalid note structure.",
+        ) from error
+    return {
+        "notes": validated_notes.model_dump(),
+        "message": str(result.get("message") or "Notes updated."),
+    }
 
 
 @app.put(
@@ -1640,6 +1899,7 @@ def update_node_progress(
     db: Session = Depends(get_db),
     current_user: models.User = Depends(get_current_user),
 ):
+    require_student_account(current_user)
     node = get_owned_node(db, subject_id, node_id, current_user.id)
     progress, revisions, topic_test = set_node_completion(
         db,
@@ -1667,6 +1927,7 @@ def get_subject_progress(
     db: Session = Depends(get_db),
     current_user: models.User = Depends(get_current_user),
 ):
+    require_student_account(current_user)
     get_owned_subject(db, subject_id, current_user.id)
     rows = (
         db.query(models.NodeProgress, models.StudyNode)
@@ -1697,6 +1958,7 @@ def complete_revision(
     db: Session = Depends(get_db),
     current_user: models.User = Depends(get_current_user),
 ):
+    require_student_account(current_user)
     get_owned_subject(db, subject_id, current_user.id)
     revision = (
         db.query(models.RevisionSchedule)
@@ -1726,6 +1988,7 @@ def get_node_practice_sets(
     db: Session = Depends(get_db),
     current_user: models.User = Depends(get_current_user),
 ):
+    require_student_account(current_user)
     get_owned_node(db, subject_id, node_id, current_user.id)
     practices = db.query(models.PracticeSet).filter_by(node_id=node_id).order_by(
         models.PracticeSet.generated_at.desc()
@@ -1742,6 +2005,7 @@ def get_topic_tests(
     db: Session = Depends(get_db),
     current_user: models.User = Depends(get_current_user),
 ):
+    require_student_account(current_user)
     get_owned_subject(db, subject_id, current_user.id)
     rows = (
         db.query(models.TopicTest, models.StudyNode.title)
@@ -1768,6 +2032,7 @@ def submit_practice_set(
     db: Session = Depends(get_db),
     current_user: models.User = Depends(get_current_user),
 ):
+    require_student_account(current_user)
     get_owned_subject(db, subject_id, current_user.id)
     practice = (
         db.query(models.PracticeSet)
@@ -1797,6 +2062,7 @@ def submit_topic_test(
     db: Session = Depends(get_db),
     current_user: models.User = Depends(get_current_user),
 ):
+    require_student_account(current_user)
     get_owned_subject(db, subject_id, current_user.id)
     test = (
         db.query(models.TopicTest)
@@ -1826,6 +2092,7 @@ def get_topic_test_attempts(
     db: Session = Depends(get_db),
     current_user: models.User = Depends(get_current_user),
 ):
+    require_student_account(current_user)
     get_owned_subject(db, subject_id, current_user.id)
     test = (
         db.query(models.TopicTest)
@@ -1854,23 +2121,32 @@ def get_daily_plan(
     db: Session = Depends(get_db),
     current_user: models.User = Depends(get_current_user),
 ):
+    require_student_account(current_user)
     get_owned_subject(db, subject_id, current_user.id)
     now = utc_now()
-    revision_rows = (
+    test_mode = os.getenv("TEST_MODE", "false").lower() == "true"
+    revision_query = (
         db.query(models.RevisionSchedule, models.StudyNode.title)
         .join(models.StudyNode, models.StudyNode.id == models.RevisionSchedule.node_id)
         .filter(
             models.RevisionSchedule.user_id == current_user.id,
             models.RevisionSchedule.status == "pending",
-            models.RevisionSchedule.due_at <= now,
             models.StudyNode.subject_id == subject_id,
         )
-        .order_by(models.RevisionSchedule.due_at)
-        .all()
     )
+    if not test_mode:
+        revision_query = revision_query.filter(models.RevisionSchedule.due_at <= now)
+    revision_rows = revision_query.order_by(models.RevisionSchedule.due_at).all()
     due_node_ids = {revision.node_id for revision, _ in revision_rows}
     practices = []
-    if due_node_ids:
+    if test_mode:
+        practices = db.query(models.PracticeSet).join(
+            models.StudyNode,
+            models.StudyNode.id == models.PracticeSet.node_id,
+        ).filter(
+            models.StudyNode.subject_id == subject_id,
+        ).order_by(models.PracticeSet.generated_at.desc()).all()
+    elif due_node_ids:
         all_practices = db.query(models.PracticeSet).filter(
             models.PracticeSet.node_id.in_(due_node_ids)
         ).order_by(models.PracticeSet.generated_at.desc()).all()
@@ -1891,10 +2167,33 @@ def get_daily_plan(
         .order_by(models.TopicTest.due_at)
         .all()
     )
+    learning_by_node = {
+        item.node_id: item
+        for item in db.query(models.NodeLearningContent).filter(
+            models.NodeLearningContent.node_id.in_(
+                {revision.node_id for revision, _ in revision_rows}
+            )
+        ).all()
+    }
+    practice_by_node = {}
+    for practice in practices:
+        current = practice_by_node.get(practice.node_id)
+        if current is None or (
+            current.source_assignment_id is not None
+            and practice.source_assignment_id is None
+        ):
+            practice_by_node[practice.node_id] = practice
+
     return {
         "generated_for": now,
         "revisions": [
-            _revision_payload(revision, title) for revision, title in revision_rows
+            _revision_payload(
+                revision,
+                title,
+                learning_by_node.get(revision.node_id),
+                practice_by_node.get(revision.node_id),
+            )
+            for revision, title in revision_rows
         ],
         "practice_sets": [_practice_payload(item) for item in practices],
         "topic_tests": [_test_payload(test, title) for test, title in test_rows],

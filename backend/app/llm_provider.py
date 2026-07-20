@@ -11,6 +11,7 @@ from app.prompts import (
     ASSIGNMENT_MAPPING_SYSTEM_PROMPT,
     LECTURE_NOTES_SYSTEM_PROMPT,
     NODE_LEARNING_CONTENT_SYSTEM_PROMPT,
+    NOTE_EDITOR_SYSTEM_PROMPT,
     QUESTION_SET_SYSTEM_PROMPT,
     RAG_ANSWER_SYSTEM_PROMPT,
     STUDY_PATH_SYSTEM_PROMPT,
@@ -369,6 +370,105 @@ Uploaded document context:
     return response.choices[0].message.content
 
 
+def edit_structured_notes(
+    path: str,
+    source_context: str,
+    current_notes: dict,
+    instruction: str,
+) -> dict:
+    """Rewrite one structured note document with the same model as Ask Tutor."""
+    client = _get_openai_client()
+    if not _remote_llm_enabled() or client is None:
+        raise LLMProviderError("The AI notes editor is not configured.")
+
+    prompt = f"""
+Subtopic:
+{path}
+
+Student instruction:
+{instruction}
+
+Current structured notes (JSON):
+{json.dumps(current_notes, ensure_ascii=False)}
+
+Source material:
+{source_context[:18000]}
+"""
+    try:
+        response = client.chat.completions.create(
+            model=_model_for("CHAT_MODEL", "gpt-4.1-mini"),
+            messages=[
+                {"role": "system", "content": NOTE_EDITOR_SYSTEM_PROMPT},
+                {"role": "user", "content": prompt},
+            ],
+            temperature=0,
+            response_format={
+                "type": "json_schema",
+                "json_schema": {
+                    "name": "prompt_note_edit",
+                    "strict": True,
+                    "schema": {
+                        "type": "object",
+                        "properties": {
+                            "message": {"type": "string"},
+                            "notes": {
+                                "type": "object",
+                                "properties": {
+                                    "overview": {"type": "string"},
+                                    "sections": {
+                                        "type": "array",
+                                        "items": {
+                                            "type": "object",
+                                            "properties": {
+                                                "heading": {"type": "string"},
+                                                "summary": {"type": "string"},
+                                                "points": {
+                                                    "type": "array",
+                                                    "items": {"type": "string"},
+                                                },
+                                            },
+                                            "required": ["heading", "summary", "points"],
+                                            "additionalProperties": False,
+                                        },
+                                    },
+                                    "key_points": {
+                                        "type": "array",
+                                        "items": {"type": "string"},
+                                    },
+                                    "questions": {
+                                        "type": "array",
+                                        "items": {"type": "string"},
+                                    },
+                                },
+                                "required": [
+                                    "overview",
+                                    "sections",
+                                    "key_points",
+                                    "questions",
+                                ],
+                                "additionalProperties": False,
+                            },
+                        },
+                        "required": ["message", "notes"],
+                        "additionalProperties": False,
+                    },
+                },
+            },
+        )
+    except OpenAIError as error:
+        _raise_openai_error(error, "structured notes editing")
+
+    try:
+        payload = json.loads(response.choices[0].message.content or "{}")
+        if not isinstance(payload.get("notes"), dict):
+            raise TypeError("notes must be an object")
+        return payload
+    except (json.JSONDecodeError, TypeError, KeyError) as error:
+        raise LLMProviderError(
+            "The AI notes editor returned an invalid response. Please try again."
+        ) from error
+
+
 def infer_study_path(
     text: str,
     filename: str,
@@ -562,6 +662,22 @@ Uploaded context:
                             "analogy": {"type": "string"},
                             "worked_example": {"type": "string"},
                             "real_life_example": {"type": "string"},
+                            "structured_sections": {
+                                "type": "array",
+                                "items": {
+                                    "type": "object",
+                                    "properties": {
+                                        "heading": {"type": "string"},
+                                        "summary": {"type": "string"},
+                                        "points": {
+                                            "type": "array",
+                                            "items": {"type": "string"},
+                                        },
+                                    },
+                                    "required": ["heading", "summary", "points"],
+                                    "additionalProperties": False,
+                                },
+                            },
                             "formulas": {
                                 "type": "array",
                                 "items": {
@@ -651,6 +767,7 @@ Uploaded context:
                             "analogy",
                             "worked_example",
                             "real_life_example",
+                            "structured_sections",
                             "formulas",
                             "key_points",
                             "conceptual_questions",

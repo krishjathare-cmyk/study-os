@@ -22,6 +22,7 @@ class User(Base):
     full_name = Column(String, nullable=False)
     email = Column(String, unique=True, index=True, nullable=False)
     hashed_password = Column(String, nullable=False)
+    account_type = Column(String, nullable=False, default="student")
     created_at = Column(DateTime(timezone=True), server_default=func.now())
 
     semesters = relationship("Semester", back_populates="user")
@@ -266,6 +267,7 @@ class NodeLearningContent(Base):
     analogy = Column(Text, nullable=False)
     worked_example = Column(Text, nullable=False)
     real_life_example = Column(Text, nullable=False, default="")
+    structured_sections = Column(JSON, nullable=False, default=list)
     formulas = Column(JSON, nullable=False, default=list)
     key_points = Column(JSON, nullable=False, default=list)
     conceptual_questions = Column(JSON, nullable=False, default=list)
@@ -308,6 +310,26 @@ class StudentNote(Base):
         index=True,
     )
     content = Column(Text, nullable=False)
+    created_at = Column(DateTime, server_default=func.now())
+    updated_at = Column(DateTime, server_default=func.now(), onupdate=func.now())
+
+
+class NodeNoteDocument(Base):
+    __tablename__ = "node_note_documents"
+    __table_args__ = (
+        UniqueConstraint("user_id", "node_id", name="uq_user_node_note_document"),
+    )
+
+    id = Column(Integer, primary_key=True, index=True)
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=False, index=True)
+    node_id = Column(
+        Integer,
+        ForeignKey("study_nodes.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    notes = Column(JSON, nullable=False, default=dict)
+    version = Column(Integer, nullable=False, default=1)
     created_at = Column(DateTime, server_default=func.now())
     updated_at = Column(DateTime, server_default=func.now(), onupdate=func.now())
 

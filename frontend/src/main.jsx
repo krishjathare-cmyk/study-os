@@ -11,15 +11,22 @@ const ICONS = {
   chevron: "m7 10 5 5 5-5",
   clock: "M12 7v5l3 2m7-2a10 10 0 1 1-20 0 10 10 0 0 1 20 0Z",
   close: "M6 6l12 12M18 6 6 18",
+  download: "M12 3v12m0 0 5-5m-5 5-5-5M5 21h14",
+  external: "M14 4h6v6m0-6-9 9M19 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V7a2 2 0 0 1 2-2h6",
   file: "M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8l-6-6Zm0 0v6h6",
+  fullscreen: "M8 3H3v5m13-5h5v5m0 8v5h-5M8 21H3v-5",
+  hand: "M7.5 11V7.5a1.5 1.5 0 0 1 3 0V10m0-4.5a1.5 1.5 0 0 1 3 0V10m0-3a1.5 1.5 0 0 1 3 0v4m0-2a1.5 1.5 0 0 1 3 0v4.5c0 4.1-2.6 7.5-7 7.5h-1.2a6 6 0 0 1-4.7-2.3L3.4 14.6a1.6 1.6 0 0 1 2.4-2.1L7.5 14V11Z",
   layers: "M12 3 3 8l9 5 9-5-9-5Zm-9 9 9 5 9-5m-18 5 9 5 9-5",
   logout: "M10 17l5-5-5-5m5 5H3m10-8V3a2 2 0 0 0-2-2H5a2 2 0 0 0-2 2v4m0 10v4a2 2 0 0 0 2 2h6a2 2 0 0 0 2-2v-1",
   microphone: "M12 2a3 3 0 0 0-3 3v7a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3Zm-7 9a7 7 0 0 0 14 0M12 18v4m-4 0h8",
+  moon: "M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8Z",
+  move: "M12 2v20m0-20L9 5m3-3 3 3M2 12h20M2 12l3-3m-3 3 3 3m17-3-3-3m3 3-3 3m-7 7-3-3m3 3 3-3",
   note: "M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8l-6-6Zm0 0v6h6M8 13h8M8 17h6",
   plus: "M12 5v14M5 12h14",
   search: "m21 21-4.3-4.3m2.3-5.7a8 8 0 1 1-16 0 8 8 0 0 1 16 0Z",
   sparkle: "m12 3 1.7 5.3L19 10l-5.3 1.7L12 17l-1.7-5.3L5 10l5.3-1.7L12 3Zm7 13 .7 2.3L22 19l-2.3.7L19 22l-.7-2.3L16 19l2.3-.7L19 16Z",
   stop: "M6 6h12v12H6z",
+  sun: "M12 8a4 4 0 1 0 0 8 4 4 0 0 0 0-8Zm0-6v2m0 16v2M4.9 4.9l1.4 1.4m11.4 11.4 1.4 1.4M2 12h2m16 0h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4",
   trash: "M4 7h16m-10 4v6m4-6v6M9 7V4h6v3m-9 0 1 14h10l1-14",
   upload: "M12 16V4m0 0L7 9m5-5 5 5M4 16v3a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-3",
 };
@@ -46,6 +53,85 @@ function initials(name = "Student") {
   return name.split(" ").map((part) => part[0]).join("").slice(0, 2).toUpperCase();
 }
 
+function useResizablePanel({ storageKey, defaultWidth, minWidth, maxWidth, direction }) {
+  const clampWidth = (value) => Math.min(maxWidth, Math.max(minWidth, value));
+  const [width, setWidth] = useState(() => {
+    const saved = Number(localStorage.getItem(`${storageKey}_width`));
+    return Number.isFinite(saved) && saved > 0 ? clampWidth(saved) : defaultWidth;
+  });
+  const [open, setOpen] = useState(() => localStorage.getItem(`${storageKey}_open`) !== "false");
+  const [resizing, setResizing] = useState(false);
+  const dragRef = useRef(null);
+
+  useEffect(() => {
+    localStorage.setItem(`${storageKey}_width`, String(width));
+  }, [storageKey, width]);
+
+  useEffect(() => {
+    localStorage.setItem(`${storageKey}_open`, String(open));
+  }, [open, storageKey]);
+
+  function startResize(event) {
+    if (!open || event.button !== 0) return;
+    event.preventDefault();
+    event.currentTarget.setPointerCapture?.(event.pointerId);
+    dragRef.current = {
+      pointerId: event.pointerId,
+      startX: event.clientX,
+      startWidth: width,
+    };
+    setResizing(true);
+  }
+
+  function moveResize(event) {
+    const drag = dragRef.current;
+    if (!drag || drag.pointerId !== event.pointerId) return;
+    event.preventDefault();
+    setWidth(clampWidth(drag.startWidth + ((event.clientX - drag.startX) * direction)));
+  }
+
+  function stopResize(event) {
+    const drag = dragRef.current;
+    if (!drag || drag.pointerId !== event.pointerId) return;
+    if (event.currentTarget.hasPointerCapture?.(event.pointerId)) {
+      event.currentTarget.releasePointerCapture(event.pointerId);
+    }
+    dragRef.current = null;
+    setResizing(false);
+  }
+
+  function resizeWithKeyboard(event) {
+    if (event.key !== "ArrowLeft" && event.key !== "ArrowRight") return;
+    event.preventDefault();
+    const screenDirection = event.key === "ArrowRight" ? 1 : -1;
+    setWidth((current) => clampWidth(current + (screenDirection * direction * 16)));
+  }
+
+  function toggle() {
+    setOpen((current) => !current);
+  }
+
+  function resetWidth() {
+    setWidth(defaultWidth);
+  }
+
+  return {
+    width,
+    open,
+    resizing,
+    toggle,
+    resetWidth,
+    resizeHandleProps: {
+      onPointerDown: startResize,
+      onPointerMove: moveResize,
+      onPointerUp: stopResize,
+      onPointerCancel: stopResize,
+      onDoubleClick: resetWidth,
+      onKeyDown: resizeWithKeyboard,
+    },
+  };
+}
+
 function flattenNodes(nodes = []) {
   return nodes.flatMap((node) => [node, ...flattenNodes(node.children || [])]);
 }
@@ -54,8 +140,55 @@ function findNode(nodes, id) {
   return flattenNodes(nodes).find((node) => node.id === id);
 }
 
-function firstLeaf(nodes) {
-  return flattenNodes(nodes).find((node) => node.node_type === "subtopic");
+const MINDMAP_POSITIONS_KEY = "study_mindmap_node_positions_v2";
+const MINDMAP_FULLSCREEN_REQUEST_KEY = "study_mindmap_open_fullscreen";
+
+function loadMindMapPositions() {
+  try {
+    return JSON.parse(localStorage.getItem(MINDMAP_POSITIONS_KEY) || "{}");
+  } catch {
+    return {};
+  }
+}
+
+function saveMindMapPositions(positions) {
+  localStorage.setItem(MINDMAP_POSITIONS_KEY, JSON.stringify(positions));
+}
+
+function requestMindMapFullscreen() {
+  sessionStorage.setItem(MINDMAP_FULLSCREEN_REQUEST_KEY, "1");
+}
+
+function consumeMindMapFullscreenRequest() {
+  const requested = sessionStorage.getItem(MINDMAP_FULLSCREEN_REQUEST_KEY) === "1";
+  sessionStorage.removeItem(MINDMAP_FULLSCREEN_REQUEST_KEY);
+  return requested;
+}
+
+function studyNodeIdFromHash() {
+  const match = window.location.hash.match(/^#(?:study-node|subtopic)-(\d+)$/);
+  return match ? Number(match[1]) : null;
+}
+
+function pdfSourceFromHash() {
+  const match = window.location.hash.match(/^#pdf-source-(\d+)-page-(\d+)$/);
+  return match ? { documentId: Number(match[1]), pageNumber: Number(match[2]) } : null;
+}
+
+function pdfSourceHref(source) {
+  return `#pdf-source-${source.document_id}-page-${source.page_number}`;
+}
+
+function studyNodeHref(node) {
+  if (!node) return "#study-map";
+  return node.node_type === "subtopic" ? `#subtopic-${node.id}` : `#study-node-${node.id}`;
+}
+
+function updateStudyHash(node, { replace = false } = {}) {
+  const nextHash = studyNodeHref(node);
+  if (window.location.hash === nextHash) return;
+  const nextUrl = `${window.location.pathname}${window.location.search}${nextHash}`;
+  window.history[replace ? "replaceState" : "pushState"](null, "", nextUrl);
 }
 
 function shortLine(text = "", fallback = "No summary yet.") {
@@ -416,6 +549,7 @@ function DemoExperience() {
 
 function AuthScreen({ onAuthenticated }) {
   const [mode, setMode] = useState("demo");
+  const [accountType, setAccountType] = useState("student");
   const [form, setForm] = useState({ full_name: "", email: "", password: "" });
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
@@ -427,10 +561,10 @@ function AuthScreen({ onAuthenticated }) {
     try {
       let user = null;
       if (mode === "register") {
-        user = await api.register(form);
+        user = await api.register({ ...form, account_type: accountType });
       }
       const result = await api.login({ email: form.email, password: form.password });
-      onAuthenticated({ token: result.access_token, user: user || { full_name: form.email.split("@")[0], email: form.email } });
+      onAuthenticated({ token: result.access_token, user: result.user || user });
     } catch (err) {
       setError(err.message || "Unable to sign in");
     } finally {
@@ -447,7 +581,7 @@ function AuthScreen({ onAuthenticated }) {
           <div className="brand-mark large"><span>◒</span> study / os</div>
           <p className="eyebrow">A calmer way to learn</p>
           <h1>Make the whole subject feel <em>navigable.</em></h1>
-          <p className="auth-intro">Your PDFs become a living map of chapters, ideas, practice and the next small thing worth remembering.</p>
+          <p className="auth-intro">Your PDFs become living maps of concepts, source-backed notes, and clear paths through complex material.</p>
           <div className="auth-stamp"><span>01</span><span>tree your thinking</span></div>
         </div>
       </section>
@@ -463,16 +597,26 @@ function AuthScreen({ onAuthenticated }) {
           ) : (
             <>
               <div className="auth-heading">
-                <p className="eyebrow">Welcome back</p>
-                <h2>{mode === "login" ? "Pick up where you left off." : "Start your study space."}</h2>
-                <p>{mode === "login" ? "Your map is waiting." : "Build a focused home for every subject."}</p>
+                <p className="eyebrow">{mode === "login" ? "Welcome back" : accountType === "professional" ? "Professional workspace" : "Student workspace"}</p>
+                <h2>{mode === "login" ? "Pick up where you left off." : accountType === "professional" ? "Turn your reference PDFs into a working map." : "Start your study space."}</h2>
+                <p>{mode === "login" ? "Your account type and workspace will open automatically." : accountType === "professional" ? "Organize PDFs in folders, then learn, map, annotate, and ask questions." : "Build a focused home for every subject."}</p>
               </div>
               <form onSubmit={submit} className="stack-form">
+                {mode === "register" && <div className="auth-account-types" role="group" aria-label="Choose account type">
+                  <button type="button" className={accountType === "student" ? "active" : ""} onClick={() => setAccountType("student")}>
+                    <span><Icon name="book" size={17} />Student</span>
+                    <small>Semesters, subjects, assignments, practice, and revision.</small>
+                  </button>
+                  <button type="button" className={accountType === "professional" ? "active" : ""} onClick={() => setAccountType("professional")}>
+                    <span><Icon name="layers" size={17} />Professional</span>
+                    <small>Folders, PDFs, global maps, learning, notes, and AI tutor.</small>
+                  </button>
+                </div>}
                 {mode === "register" && <label>Full name<input required value={form.full_name} onChange={(e) => setForm({ ...form, full_name: e.target.value })} placeholder="Your name" /></label>}
                 <label>Email<input required type="email" value={form.email} onChange={(e) => setForm({ ...form, email: e.target.value })} placeholder="you@example.com" /></label>
                 <label>Password<input required minLength="6" type="password" value={form.password} onChange={(e) => setForm({ ...form, password: e.target.value })} placeholder="At least 6 characters" /></label>
                 {error && <div className="form-error">{error}</div>}
-                <button className="primary-button full" disabled={busy}>{busy ? "Opening your space..." : mode === "login" ? "Enter study OS" : "Create my space"}<Icon name="arrow" size={17} /></button>
+                <button className="primary-button full" disabled={busy}>{busy ? "Opening your space..." : mode === "login" ? "Enter study OS" : accountType === "professional" ? "Create professional space" : "Create study space"}<Icon name="arrow" size={17} /></button>
               </form>
               <p className="auth-footnote">Your study material stays scoped to your account.</p>
             </>
@@ -483,7 +627,7 @@ function AuthScreen({ onAuthenticated }) {
   );
 }
 
-function EmptyWorkspace({ token, semesters, onCreated }) {
+function EmptyWorkspace({ token, semesters, onCreated, professionalMode = false }) {
   const [semesterName, setSemesterName] = useState("");
   const [subjectName, setSubjectName] = useState("");
   const [busy, setBusy] = useState(false);
@@ -495,8 +639,8 @@ function EmptyWorkspace({ token, semesters, onCreated }) {
     setError("");
     try {
       let semester = semesters[0];
-      if (!semester) semester = await api.createSemester({ name: semesterName || "My semester", description: "" }, token);
-      await api.createSubject({ name: subjectName || "New subject", description: "", semester_id: semester.id }, token);
+      if (!semester) semester = await api.createSemester({ name: professionalMode ? "Professional library" : semesterName || "My semester", description: "" }, token);
+      await api.createSubject({ name: subjectName || (professionalMode ? "New folder" : "New subject"), description: "", semester_id: semester.id }, token);
       onCreated();
     } catch (err) {
       setError(err.message);
@@ -508,14 +652,14 @@ function EmptyWorkspace({ token, semesters, onCreated }) {
   return (
     <div className="empty-workspace">
       <div className="empty-symbol"><Icon name="layers" size={34} /></div>
-      <p className="eyebrow">First page</p>
-      <h2>Give your learning a home.</h2>
-      <p>Create a semester and subject, then upload the first chapter PDF. We’ll build the tree as you go.</p>
+      <p className="eyebrow">{professionalMode ? "Your PDF library" : "First page"}</p>
+      <h2>{professionalMode ? "Create your first folder." : "Give your learning a home."}</h2>
+      <p>{professionalMode ? "Add a folder, upload reference PDFs, and we’ll build a navigable global map from them." : "Create a semester and subject, then upload the first chapter PDF. We’ll build the tree as you go."}</p>
       <form onSubmit={createWorkspace} className="empty-form">
-        {!semesters.length && <input value={semesterName} onChange={(e) => setSemesterName(e.target.value)} placeholder="Semester name" />}
-        <input value={subjectName} onChange={(e) => setSubjectName(e.target.value)} placeholder="Subject name" />
+        {!professionalMode && !semesters.length && <input value={semesterName} onChange={(e) => setSemesterName(e.target.value)} placeholder="Semester name" />}
+        <input value={subjectName} onChange={(e) => setSubjectName(e.target.value)} placeholder={professionalMode ? "Folder name" : "Subject name"} />
         {error && <div className="form-error">{error}</div>}
-        <button className="primary-button" disabled={busy}>{busy ? "Creating..." : "Create study space"}<Icon name="arrow" size={17} /></button>
+        <button className="primary-button" disabled={busy}>{busy ? "Creating..." : professionalMode ? "Create folder" : "Create study space"}<Icon name="arrow" size={17} /></button>
       </form>
     </div>
   );
@@ -529,85 +673,627 @@ function TreeNode({ node, selectedId, onSelect, progressMap, depth = 0 }) {
     <div className="tree-item">
       <div className={`tree-row ${selectedId === node.id ? "selected" : ""}`} style={{ "--depth": depth }}>
         {hasChildren ? <button className={`tree-toggle ${open ? "open" : ""}`} onClick={() => setOpen(!open)}><Icon name="chevron" size={14} /></button> : <span className="tree-dot" />}
-        <button className="tree-label" onClick={() => onSelect(node.id)}>
+        <a className="tree-label" href={studyNodeHref(node)} onClick={(event) => { event.preventDefault(); updateStudyHash(node); onSelect(node.id); }}>
           <span className={`node-index level-${node.level}`}>{node.heading_number || (node.node_type === "chapter" ? "C" : "•")}</span>
           <span className="tree-title">{node.title}</span>
           {complete && <span className="tree-complete"><Icon name="check" size={13} /></span>}
-        </button>
+        </a>
       </div>
       {hasChildren && open && <div className="tree-children">{node.children.map((child) => <TreeNode key={child.id} node={child} selectedId={selectedId} onSelect={onSelect} progressMap={progressMap} depth={depth + 1} />)}</div>}
     </div>
   );
 }
 
-function Sidebar({ user, semesters, selectedSemester, subjects, selectedSubjectId, documents, lectures, lectureView, selectedLectureId, onSemester, onSubject, onAddSemester, onAddSubject, onDeleteSubject, onDeleteDocument, tree, selectedNodeId, onNode, progressMap, onUpload, onLectures, onLecture, onStartLecture, onLogout }) {
+function Sidebar({ user, professionalMode = false, semesters, selectedSemester, subjects, selectedSubjectId, documents, lectures, lectureView, selectedLectureId, onSemester, onSubject, onAddSemester, onAddSubject, onDeleteSubject, onDocument, onDeleteDocument, tree, selectedNodeId, onNode, progressMap, onUpload, onLectures, onLecture, onStartLecture, onLogout }) {
+  const panel = useResizablePanel({
+    storageKey: "study_left_panel",
+    defaultWidth: 286,
+    minWidth: 230,
+    maxWidth: 460,
+    direction: 1,
+  });
   return (
-    <aside className="sidebar">
+    <aside className={`sidebar resizable-panel ${professionalMode ? "professional-sidebar" : ""} ${panel.open ? "" : "panel-collapsed"} ${panel.resizing ? "panel-resizing" : ""}`} style={{ "--panel-width": `${panel.width}px` }}>
+      <button type="button" className="panel-edge-toggle left-panel-toggle" aria-expanded={panel.open} onClick={panel.toggle} title={panel.open ? "Close navigation panel" : "Open navigation panel"}><span aria-hidden="true">{panel.open ? "‹" : "›"}</span></button>
+      <span className="panel-resize-handle left-panel-resize" role="separator" aria-label="Resize navigation panel" aria-orientation="vertical" tabIndex={panel.open ? 0 : -1} {...panel.resizeHandleProps} />
       <div className="sidebar-top">
         <div className="brand-mark"><span>◒</span> study / os</div>
         <button className="icon-button mobile-close"><Icon name="close" /></button>
       </div>
-      <div className="semester-picker">
+      {!professionalMode && <div className="semester-picker">
         <span className="mini-label">Workspace</span>
         <div className="semester-picker-row"><select value={selectedSemester?.id || ""} onChange={(e) => onSemester(Number(e.target.value))}>
           {semesters.map((semester) => <option value={semester.id} key={semester.id}>{semester.name}</option>)}
         </select><button className="tiny-action" onClick={onAddSemester} title="Add semester"><Icon name="plus" size={15} /></button></div>
         <Icon name="chevron" size={14} />
-      </div>
+      </div>}
       <div className="sidebar-section">
-        <div className="section-heading"><span>Your subjects</span><button className="tiny-action" onClick={onAddSubject} title="Add subject"><Icon name="plus" size={15} /></button></div>
+        <div className="section-heading"><span>{professionalMode ? "Folders" : "Your subjects"}</span><button className="tiny-action" onClick={onAddSubject} title={professionalMode ? "Add folder" : "Add subject"}><Icon name="plus" size={15} /></button></div>
         <div className="subject-list">
           {subjects.map((subject) => <div key={subject.id} className={`subject-item-row ${selectedSubjectId === subject.id ? "active" : ""}`}><button className="subject-item" onClick={() => onSubject(subject.id)}><span className="subject-color" />{subject.name}<span className="subject-arrow">›</span></button><button className="subject-delete" onClick={() => onDeleteSubject(subject)} title={`Delete ${subject.name}`}><Icon name="trash" size={13} /></button></div>)}
-          {!subjects.length && <p className="muted small">Create your first subject to begin.</p>}
+          {!subjects.length && <p className="muted small">Create your first {professionalMode ? "folder" : "subject"} to begin.</p>}
         </div>
       </div>
-      <div className={`sidebar-section lecture-section ${lectureView ? "active-section" : ""}`}>
+      {!professionalMode && <div className={`sidebar-section lecture-section ${lectureView ? "active-section" : ""}`}>
         <div className="section-heading"><button className="section-link" onClick={onLectures}>Lectures</button><span className="tree-count">{lectures.length}</span><button className="tiny-action" onClick={onStartLecture} title="Start a lecture"><Icon name="plus" size={15} /></button></div>
         {lectures.length ? <div className="lecture-list">{lectures.map((lecture) => <button key={lecture.id} className={`lecture-row ${selectedLectureId === lecture.id ? "selected" : ""}`} onClick={() => onLecture(lecture.id)}><span className="lecture-number">{String(lecture.lecture_number).padStart(2, "0")}</span><span><strong>{lecture.title}</strong><small>{lecture.status === "ready" ? "Notes ready" : "Transcript in progress"}</small></span><span className={`lecture-status ${lecture.status}`} /></button>)}</div> : <button className="lecture-empty" onClick={onStartLecture}><Icon name="microphone" size={14} />Start your first lecture</button>}
-      </div>
-      {documents.length > 0 && <div className="sidebar-section document-section"><div className="section-heading"><span>Study material</span><span className="tree-count">{documents.length} PDFs</span></div><div className="document-list">{documents.map((document) => <div className="document-row" key={document.id}><span className="document-icon"><Icon name="file" size={13} /></span><span className="document-copy"><strong title={document.filename}>{document.filename}</strong><small title={document.description}>{document.description}</small></span><button className="document-delete" onClick={() => onDeleteDocument(document)} title={`Delete ${document.filename}`}><Icon name="trash" size={13} /></button></div>)}</div></div>}
-      {tree.length > 0 && <div className="sidebar-section tree-section"><div className="section-heading"><span>Study map</span><span className="tree-count">{flattenNodes(tree).filter((node) => node.node_type === "subtopic").length} nodes</span></div><div className="tree-list">{tree.map((node) => <TreeNode key={node.id} node={node} selectedId={selectedNodeId} onSelect={onNode} progressMap={progressMap} />)}</div></div>}
+      </div>}
+      {documents.length > 0 && <div className="sidebar-section document-section"><div className="section-heading"><span>{professionalMode ? "PDFs" : "Study material"}</span><span className="tree-count">{documents.length} PDFs</span></div><div className="document-list">{documents.map((document) => <div className="document-row" key={document.id}><button className="document-open" onClick={() => onDocument(document)} title={`Open ${document.filename}`}><span className="document-icon"><Icon name="file" size={13} /></span><span className="document-copy"><strong>{document.filename}</strong><small>{document.description}</small></span></button><button className="document-delete" onClick={() => onDeleteDocument(document)} title={`Delete ${document.filename}`}><Icon name="trash" size={13} /></button></div>)}</div></div>}
+      {tree.length > 0 && <div className="sidebar-section tree-section"><div className="section-heading"><button className="section-link map-home-link" onClick={() => { updateStudyHash(null); onNode(null); }}>{professionalMode ? "Global map" : "Study map"}</button><span className="tree-count">{flattenNodes(tree).filter((node) => node.node_type === "subtopic").length} nodes</span></div><div className="tree-list">{tree.map((node) => <TreeNode key={node.id} node={node} selectedId={selectedNodeId} onSelect={onNode} progressMap={progressMap} />)}</div></div>}
       <div className="sidebar-bottom">
-        <button className="upload-side-button" onClick={onUpload}><Icon name="upload" size={16} /><span>Upload material</span><kbd>U</kbd></button>
-        <div className="profile-row"><div className="avatar">{initials(user?.full_name || user?.email)}</div><div className="profile-copy"><strong>{user?.full_name || "Student"}</strong><span>{user?.email || "Your account"}</span></div><button className="icon-button" onClick={onLogout} title="Log out"><Icon name="logout" size={16} /></button></div>
+        <button className="upload-side-button" onClick={onUpload}><Icon name="upload" size={16} /><span>{professionalMode ? "Upload PDF" : "Upload material"}</span><kbd>U</kbd></button>
+        <div className="profile-row"><div className="avatar">{initials(user?.full_name || user?.email)}</div><div className="profile-copy"><strong>{user?.full_name || (professionalMode ? "Professional" : "Student")}</strong><span>{professionalMode ? "Professional account" : user?.email || "Your account"}</span></div><button className="icon-button" onClick={onLogout} title="Log out"><Icon name="logout" size={16} /></button></div>
       </div>
     </aside>
   );
 }
 
-function TodayPanel({ subjectId, plan, progressRows, tree, onNode, onRevision, onTest }) {
+function RevisionItem({ revision, subjectId, onNode, onRevision, onSubmitPractice }) {
+  const [open, setOpen] = useState(false);
+  const [answers, setAnswers] = useState({});
+  const [result, setResult] = useState(null);
+  const [busy, setBusy] = useState(false);
+  const questions = revision.practice_questions || [];
+
+  async function submit(event) {
+    event.preventDefault();
+    if (!revision.practice_set_id) return;
+    setBusy(true);
+    try {
+      const token = localStorage.getItem("study_token");
+      const submitter = onSubmitPractice || (
+        (practiceId, practiceAnswers) => api.submitPractice(subjectId, practiceId, practiceAnswers, token)
+      );
+      setResult(await submitter(revision.practice_set_id, answers));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return <article className={`revision-card ${open ? "open" : ""}`}>
+    <button className="queue-item" onClick={() => setOpen(!open)}>
+      <span className="queue-icon"><Icon name="clock" size={15} /></span>
+      <span><strong>{revision.node_title}</strong><small>{revision.status === "overdue" ? formatOverdue(revision.days_overdue) : `review after ${revision.interval_days}d`}</small></span>
+      <span className="queue-check" title="Mark revision complete" onClick={(event) => { event.stopPropagation(); onRevision(revision); }}><Icon name="check" size={14} /></span>
+    </button>
+    {open && <div className="revision-detail">
+      {revision.revision_note && <p className="revision-note">{revision.revision_note}</p>}
+      {revision.revision_points?.length > 0 && <ul className="revision-points">{revision.revision_points.map((point, index) => <li key={`${revision.id}-point-${index}`}>{point}</li>)}</ul>}
+      {questions.length > 0 ? <form className="revision-quiz" onSubmit={submit}>
+        <span className="kicker">Quick check</span>
+        {questions.map((question, index) => <fieldset key={question.id}>
+          <legend><span>{String(index + 1).padStart(2, "0")}</span>{question.question}</legend>
+          <div className="revision-options">{question.options.map((option) => <label key={option} className={answers[question.id] === option ? "selected" : ""}><input required={!result} type="radio" name={`revision-${revision.id}-${question.id}`} value={option} checked={answers[question.id] === option} disabled={Boolean(result)} onChange={(event) => setAnswers({ ...answers, [question.id]: event.target.value })} /><span>{option}</span></label>)}</div>
+        </fieldset>)}
+        {result && <div className="revision-result">{Math.round(result.percentage)}% · {result.score}/{result.max_score} correct</div>}
+        {!result && <button className="secondary-button" disabled={busy}>{busy ? "Checking..." : "Check quiz"}</button>}
+      </form> : <p className="revision-empty">No quick quiz is available for this node yet.</p>}
+      <button className="revision-open" onClick={() => onNode(revision.node_id)}>Open full revision page <Icon name="arrow" size={14} /></button>
+    </div>}
+  </article>;
+}
+
+function TodayPanel({ subjectId, plan, progressRows, tree, onNode, onRevision, onTest, onSubmitPractice }) {
+  const panel = useResizablePanel({
+    storageKey: "study_today_panel",
+    defaultWidth: 306,
+    minWidth: 260,
+    maxWidth: 520,
+    direction: -1,
+  });
   const leaves = flattenNodes(tree).filter((node) => node.node_type === "subtopic");
   const completed = progressRows.filter((row) => row.status === "completed").length;
   const percent = leaves.length ? Math.round((completed / leaves.length) * 100) : 0;
   return (
-    <aside className="today-panel">
+    <aside className={`today-panel resizable-panel ${panel.open ? "" : "panel-collapsed"} ${panel.resizing ? "panel-resizing" : ""}`} style={{ "--panel-width": `${panel.width}px` }}>
+      <button type="button" className="panel-edge-toggle right-panel-toggle" aria-expanded={panel.open} onClick={panel.toggle} title={panel.open ? "Close Today panel" : "Open Today panel"}><span aria-hidden="true">{panel.open ? "›" : "‹"}</span></button>
+      <span className="panel-resize-handle right-panel-resize" role="separator" aria-label="Resize Today panel" aria-orientation="vertical" tabIndex={panel.open ? 0 : -1} {...panel.resizeHandleProps} />
       <div className="today-heading"><div><p className="eyebrow">Your rhythm</p><h3>Today</h3></div><span className="date-stamp">{formatDate(new Date(), { weekday: "short", month: "short", day: "numeric" })}</span></div>
       <div className="progress-card"><div className="progress-card-top"><span>Subject progress</span><strong>{percent}%</strong></div><div className="progress-track"><span style={{ width: `${percent}%` }} /></div><p>{completed} of {leaves.length || "your"} subtopics completed</p></div>
-      <div className="today-block"><div className="block-title"><span className="signal amber" />Revision queue <span>{plan?.revisions?.length || 0}</span></div>{plan?.revisions?.length ? plan.revisions.map((revision) => <button className="queue-item" key={revision.id} onClick={() => onNode(revision.node_id)}><span className="queue-icon"><Icon name="clock" size={15} /></span><span><strong>{revision.node_title}</strong><small>{revision.status === "overdue" ? formatOverdue(revision.days_overdue) : `review after ${revision.interval_days}d`}</small></span><span className="queue-check" title="Mark revision complete" onClick={(event) => { event.stopPropagation(); onRevision(revision); }}><Icon name="check" size={14} /></span></button>) : <div className="empty-queue"><span>Nothing due today.</span><small>Finish a node and we’ll schedule the next revisit.</small></div>}</div>
+      <div className="today-block"><div className="block-title"><span className="signal amber" />Revision queue <span>{plan?.revisions?.length || 0}</span></div>{plan?.revisions?.length ? plan.revisions.map((revision) => <RevisionItem key={revision.id} revision={revision} subjectId={subjectId} onNode={onNode} onRevision={onRevision} onSubmitPractice={onSubmitPractice} />) : <div className="empty-queue"><span>Nothing due today.</span><small>Finish a node and we’ll schedule the next revisit.</small></div>}</div>
+      <div className="today-block"><div className="block-title"><span className="signal blue" />Assignments <span>{plan?.practice_sets?.length || 0}</span></div>{plan?.practice_sets?.length ? plan.practice_sets.map((practice) => <button className="test-queue" key={practice.id} onClick={() => onNode(practice.node_id)}><span className="test-number">{practice.questions.length}</span><span><strong>{practice.title}</strong><small>{practice.source_assignment_id ? "From uploaded assignment" : "Generated practice"}</small></span><Icon name="arrow" size={15} /></button>) : <div className="empty-queue"><span>No assignments generated yet.</span><small>Upload an assignment or complete a subtopic.</small></div>}</div>
       <div className="today-block"><div className="block-title"><span className="signal coral" />Topic tests <span>{plan?.topic_tests?.length || 0}</span></div>{plan?.topic_tests?.length ? plan.topic_tests.map((test) => <button className="test-queue" key={test.id} onClick={() => onTest(test)}><span className="test-number">{test.questions.length}</span><span><strong>{test.node_title}</strong><small>{test.status === "overdue" ? formatOverdue(test.days_overdue) : `due ${formatDate(test.due_at)}`}</small></span><Icon name="arrow" size={15} /></button>) : <div className="empty-queue"><span>No active tests yet.</span><small>Complete every subtopic in a topic to unlock one.</small></div>}</div>
       <div className="today-quote"><span>“</span><p>Small, repeated returns beat one heroic cram session.</p><small>study / os principle 04</small></div>
     </aside>
   );
 }
 
-function Breadcrumb({ detail }) {
-  return <div className="breadcrumb">{detail?.breadcrumb?.map((item, index) => <span key={item.id}><span className={index === detail.breadcrumb.length - 1 ? "current" : ""}>{item.title}</span>{index < detail.breadcrumb.length - 1 && <b> / </b>}</span>)}</div>;
+function Breadcrumb({ detail, onNode, professionalMode = false }) {
+  if (!detail) return null;
+  return <nav className="breadcrumb" aria-label={`${professionalMode ? "Global" : "Study"} map breadcrumb`}><a href="#study-map" onClick={(event) => { event.preventDefault(); updateStudyHash(null); onNode(null); }}>{professionalMode ? "Global map" : "Study map"}</a><b> / </b>{detail.breadcrumb.map((item, index) => <span key={item.id}>{index === detail.breadcrumb.length - 1 ? <span className="current">{item.title}</span> : <a href={studyNodeHref(item)} onClick={(event) => { event.preventDefault(); updateStudyHash(item); onNode(item.id); }}>{item.title}</a>}{index < detail.breadcrumb.length - 1 && <b> / </b>}</span>)}</nav>;
 }
 
-function Overview({ detail, tree, onNode }) {
+function buildRadialMindMap(tree = [], rootTitle = "Study map") {
+  const rawNodes = [{ id: "study-map-root", title: rootTitle, node_type: "root", depth: 0, angle: 0 }];
+  const edges = [];
+  const countLeaves = (node) => (node.children?.length ? node.children.reduce((sum, child) => sum + countLeaves(child), 0) : 1);
+  const addBranch = (node, parentId, startAngle, endAngle, depth) => {
+    const angle = (startAngle + endAngle) / 2;
+    rawNodes.push({ ...node, depth, angle });
+    edges.push({ source: parentId, target: node.id });
+    const children = node.children || [];
+    if (!children.length) return;
+    const totalLeaves = children.reduce((sum, child) => sum + countLeaves(child), 0);
+    let cursor = startAngle;
+    children.forEach((child) => {
+      const span = (endAngle - startAngle) * (countLeaves(child) / totalLeaves);
+      addBranch(child, node.id, cursor, cursor + span, depth + 1);
+      cursor += span;
+    });
+  };
+
+  if (tree.length) {
+    const start = tree.length === 1 ? -Math.PI / 2 - 0.9 : -Math.PI / 2;
+    const span = tree.length === 1 ? 1.8 : Math.PI * 2;
+    let cursor = start;
+    const totalLeaves = tree.reduce((sum, node) => sum + countLeaves(node), 0);
+    tree.forEach((node) => {
+      const branchSpan = span * (countLeaves(node) / totalLeaves);
+      addBranch(node, "study-map-root", cursor, cursor + branchSpan, 1);
+      cursor += branchSpan;
+    });
+  }
+
+  const maxDepth = Math.max(...rawNodes.map((node) => node.depth), 1);
+  const totalLeaves = tree.reduce((sum, node) => sum + countLeaves(node), 0);
+  const minimumOuterRadius = totalLeaves > 1 ? (totalLeaves * 112) / (Math.PI * 2) : 190;
+  const outerRadius = Math.max(maxDepth * 165, minimumOuterRadius);
+  const innerLayerGap = Math.min(230, outerRadius / maxDepth);
+  const center = Math.max(430, outerRadius + 105);
+  const nodes = rawNodes.map((node) => {
+    const radius = node.depth === maxDepth || node.node_type === "subtopic"
+      ? outerRadius
+      : node.depth * innerLayerGap;
+    return { ...node, x: center + Math.cos(node.angle) * radius, y: center + Math.sin(node.angle) * radius };
+  });
+  return { nodes, edges, size: center * 2 };
+}
+
+function globalMapTree(tree, expandedTopicId) {
+  return tree.map((node) => ({
+    ...node,
+    children: (node.children || [])
+      .filter((child) => child.node_type !== "subtopic" || node.id === expandedTopicId)
+      .map((child) => ({
+        ...child,
+        children: child.node_type === "subtopic" ? [] : globalMapTree([child], expandedTopicId)[0].children,
+      })),
+  }));
+}
+
+function RadialMindMapNode({ node, onNode, onTopicToggle, onMoveStart, selectedId, progressMap, dragging, expanded }) {
+  const isRoot = node.node_type === "root";
+  const isLeaf = node.node_type === "subtopic";
+  const isTopic = node.node_type === "topic";
+  const completed = progressMap[node.id]?.status === "completed";
+  const className = `mindmap-radial-node ${isRoot ? "mindmap-radial-root" : isLeaf ? "mindmap-radial-leaf" : node.node_type === "chapter" ? "mindmap-radial-chapter" : "mindmap-radial-topic"} ${selectedId === node.id ? "selected" : ""} ${completed ? "completed" : ""} ${dragging ? "dragging" : ""} ${expanded ? "expanded" : ""}`;
+  const content = <><span className="mindmap-radial-label">{node.heading_number || (isRoot ? "MAP" : node.node_type === "chapter" ? "CHAPTER" : "TOPIC")}</span><strong title={node.title}>{node.title}</strong>{isLeaf && <small>{completed ? "Completed" : "Open content"}</small>}{isTopic && <small>{expanded ? "Hide subtopics" : "Show subtopics"}</small>}</>;
+  if (isRoot) return <a href="#study-map" draggable={false} className={className} style={{ left: node.x, top: node.y }} onPointerDown={(event) => onMoveStart(event, node)} onClick={(event) => { event.preventDefault(); updateStudyHash(null); onNode(null); }}>{content}</a>;
+  if (isTopic) return <a href={studyNodeHref(node)} draggable={false} className={className} style={{ left: node.x, top: node.y }} aria-expanded={expanded} onPointerDown={(event) => onMoveStart(event, node)} onClick={(event) => { event.preventDefault(); onTopicToggle(node.id); }}>{content}</a>;
+  return <a href={studyNodeHref(node)} draggable={false} className={className} style={{ left: node.x, top: node.y }} onPointerDown={(event) => onMoveStart(event, node)} onClick={(event) => { event.preventDefault(); updateStudyHash(node); onNode(node.id); }}>{content}</a>;
+}
+
+function FullStudyMindMap({ tree, onNode, rootTitle, selectedId, progressMap = {}, startFullscreen = false, onFullscreenStarted, professionalMode = false }) {
+  const minZoom = 0.35;
+  const maxZoom = 1.6;
+  const zoomStep = 0.1;
+  const [expandedTopicId, setExpandedTopicId] = useState(null);
+  const visibleTree = useMemo(() => globalMapTree(tree, expandedTopicId), [tree, expandedTopicId]);
+  const layout = useMemo(() => buildRadialMindMap(visibleTree, rootTitle), [visibleTree, rootTitle]);
+  const panelRef = useRef(null);
+  const scrollRef = useRef(null);
+  const panRef = useRef(null);
+  const nodeDragRef = useRef(null);
+  const draggedRef = useRef(false);
+  const zoomAnchorRef = useRef(null);
+  const positionsRef = useRef(loadMindMapPositions());
+  const [handActive, setHandActive] = useState(true);
+  const [arrangeActive, setArrangeActive] = useState(false);
+  const [panning, setPanning] = useState(false);
+  const [draggingNodeId, setDraggingNodeId] = useState(null);
+  const [nodePositions, setNodePositions] = useState(positionsRef.current);
+  const [zoom, setZoom] = useState(0.85);
+  const [browserFullscreen, setBrowserFullscreen] = useState(false);
+  const [fallbackFullscreen, setFallbackFullscreen] = useState(() => {
+    const storedRequest = consumeMindMapFullscreenRequest();
+    return Boolean(startFullscreen) || storedRequest;
+  });
+  const isFullscreen = browserFullscreen || fallbackFullscreen;
+  const positionedNodes = useMemo(() => layout.nodes.map((node) => {
+    const saved = nodePositions[node.id];
+    if (!saved) return node;
+    return {
+      ...node,
+      x: Math.min(layout.size - 55, Math.max(55, saved.x)),
+      y: Math.min(layout.size - 55, Math.max(55, saved.y)),
+    };
+  }), [layout, nodePositions]);
+
+  function centerMap() {
+    const scroller = scrollRef.current;
+    if (!scroller) return;
+    scroller.scrollLeft = Math.max(0, (scroller.scrollWidth - scroller.clientWidth) / 2);
+    scroller.scrollTop = Math.max(0, (scroller.scrollHeight - scroller.clientHeight) / 2);
+  }
+
+  function changeZoom(rawZoom, clientX = null, clientY = null) {
+    const nextZoom = Math.min(maxZoom, Math.max(minZoom, Math.round(rawZoom * 20) / 20));
+    if (nextZoom === zoom) return;
+    const scroller = scrollRef.current;
+    if (scroller) {
+      const rect = scroller.getBoundingClientRect();
+      const viewportX = clientX === null ? scroller.clientWidth / 2 : clientX - rect.left;
+      const viewportY = clientY === null ? scroller.clientHeight / 2 : clientY - rect.top;
+      const oldPaddingX = Math.max(0, (scroller.clientWidth - layout.size * zoom) / 2);
+      const oldPaddingY = Math.max(0, (scroller.clientHeight - layout.size * zoom) / 2);
+      zoomAnchorRef.current = {
+        contentX: (scroller.scrollLeft + viewportX - oldPaddingX) / zoom,
+        contentY: (scroller.scrollTop + viewportY - oldPaddingY) / zoom,
+        viewportX,
+        viewportY,
+      };
+    }
+    setZoom(nextZoom);
+  }
+
+  useEffect(() => {
+    const frame = window.requestAnimationFrame(centerMap);
+    return () => window.cancelAnimationFrame(frame);
+  }, [layout.size, isFullscreen, expandedTopicId]);
+
+  useEffect(() => {
+    const anchor = zoomAnchorRef.current;
+    if (!anchor) return undefined;
+    const frame = window.requestAnimationFrame(() => {
+      const scroller = scrollRef.current;
+      if (!scroller) return;
+      const newPaddingX = Math.max(0, (scroller.clientWidth - layout.size * zoom) / 2);
+      const newPaddingY = Math.max(0, (scroller.clientHeight - layout.size * zoom) / 2);
+      scroller.scrollLeft = anchor.contentX * zoom + newPaddingX - anchor.viewportX;
+      scroller.scrollTop = anchor.contentY * zoom + newPaddingY - anchor.viewportY;
+      zoomAnchorRef.current = null;
+    });
+    return () => window.cancelAnimationFrame(frame);
+  }, [zoom, layout.size]);
+
+  useEffect(() => {
+    const scroller = scrollRef.current;
+    if (!scroller) return undefined;
+    const handleWheel = (event) => {
+      event.preventDefault();
+      const direction = event.deltaY < 0 ? 1 : -1;
+      changeZoom(zoom + direction * zoomStep, event.clientX, event.clientY);
+    };
+    scroller.addEventListener("wheel", handleWheel, { passive: false });
+    return () => scroller.removeEventListener("wheel", handleWheel);
+  }, [zoom, layout.size]);
+
+  useEffect(() => {
+    const syncFullscreen = () => setBrowserFullscreen(document.fullscreenElement === panelRef.current);
+    document.addEventListener("fullscreenchange", syncFullscreen);
+    return () => document.removeEventListener("fullscreenchange", syncFullscreen);
+  }, []);
+
+  useEffect(() => {
+    if (!startFullscreen) return;
+    setFallbackFullscreen(true);
+    onFullscreenStarted?.();
+  }, [startFullscreen, onFullscreenStarted]);
+
+  useEffect(() => {
+    if (!fallbackFullscreen) return undefined;
+    const previousOverflow = document.body.style.overflow;
+    const exitOnEscape = (event) => {
+      if (event.key === "Escape") setFallbackFullscreen(false);
+    };
+    document.body.style.overflow = "hidden";
+    window.addEventListener("keydown", exitOnEscape);
+    return () => {
+      document.body.style.overflow = previousOverflow;
+      window.removeEventListener("keydown", exitOnEscape);
+    };
+  }, [fallbackFullscreen]);
+
+  async function toggleFullscreen() {
+    if (fallbackFullscreen) {
+      setFallbackFullscreen(false);
+      return;
+    }
+    if (document.fullscreenElement === panelRef.current) {
+      await document.exitFullscreen();
+      return;
+    }
+    try {
+      if (panelRef.current?.requestFullscreen) {
+        await panelRef.current.requestFullscreen();
+      } else {
+        setFallbackFullscreen(true);
+      }
+    } catch {
+      setFallbackFullscreen(true);
+    }
+  }
+
+  function startNodeMove(event, node) {
+    if (!arrangeActive || event.button !== 0) return;
+    event.stopPropagation();
+    draggedRef.current = false;
+    event.currentTarget.setPointerCapture?.(event.pointerId);
+    nodeDragRef.current = {
+      pointerId: event.pointerId,
+      nodeId: node.id,
+      captureElement: event.currentTarget,
+      startX: event.clientX,
+      startY: event.clientY,
+      nodeX: node.x,
+      nodeY: node.y,
+      moved: false,
+    };
+  }
+
+  function startPan(event) {
+    if (!handActive || event.button !== 0) return;
+    const scroller = scrollRef.current;
+    if (!scroller) return;
+    draggedRef.current = false;
+    panRef.current = {
+      pointerId: event.pointerId,
+      startX: event.clientX,
+      startY: event.clientY,
+      scrollLeft: scroller.scrollLeft,
+      scrollTop: scroller.scrollTop,
+      moved: false,
+    };
+  }
+
+  function movePan(event) {
+    const pan = panRef.current;
+    const scroller = scrollRef.current;
+    if (!handActive || !pan || !scroller || pan.pointerId !== event.pointerId) return;
+    const deltaX = event.clientX - pan.startX;
+    const deltaY = event.clientY - pan.startY;
+    if (!pan.moved && Math.hypot(deltaX, deltaY) < 5) return;
+    if (!pan.moved) {
+      scroller.setPointerCapture?.(event.pointerId);
+      setPanning(true);
+    }
+    pan.moved = true;
+    draggedRef.current = true;
+    event.preventDefault();
+    scroller.scrollLeft = pan.scrollLeft - deltaX;
+    scroller.scrollTop = pan.scrollTop - deltaY;
+  }
+
+  function moveNode(event) {
+    const drag = nodeDragRef.current;
+    const scroller = scrollRef.current;
+    if (!arrangeActive || !drag || !scroller || drag.pointerId !== event.pointerId) return false;
+    const screenDeltaX = event.clientX - drag.startX;
+    const screenDeltaY = event.clientY - drag.startY;
+    if (!drag.moved && Math.hypot(screenDeltaX, screenDeltaY) < 5) return true;
+    const deltaX = screenDeltaX / zoom;
+    const deltaY = screenDeltaY / zoom;
+    if (!drag.moved) {
+      setDraggingNodeId(drag.nodeId);
+    }
+    drag.moved = true;
+    draggedRef.current = true;
+    event.preventDefault();
+    const margin = drag.nodeId === "study-map-root" ? 100 : 58;
+    const nextPositions = {
+      ...positionsRef.current,
+      [drag.nodeId]: {
+        x: Math.min(layout.size - margin, Math.max(margin, drag.nodeX + deltaX)),
+        y: Math.min(layout.size - margin, Math.max(margin, drag.nodeY + deltaY)),
+      },
+    };
+    positionsRef.current = nextPositions;
+    setNodePositions(nextPositions);
+    return true;
+  }
+
+  function stopPan(event) {
+    const pan = panRef.current;
+    const scroller = scrollRef.current;
+    if (!pan || pan.pointerId !== event.pointerId) return;
+    if (scroller?.hasPointerCapture?.(event.pointerId)) scroller.releasePointerCapture(event.pointerId);
+    panRef.current = null;
+    setPanning(false);
+    if (pan.moved) window.setTimeout(() => { draggedRef.current = false; }, 0);
+  }
+
+  function movePointer(event) {
+    if (moveNode(event)) return;
+    movePan(event);
+  }
+
+  function stopPointer(event) {
+    const drag = nodeDragRef.current;
+    if (drag?.pointerId === event.pointerId) {
+      if (drag.captureElement?.hasPointerCapture?.(event.pointerId)) drag.captureElement.releasePointerCapture(event.pointerId);
+      nodeDragRef.current = null;
+      setDraggingNodeId(null);
+      if (drag.moved) {
+        saveMindMapPositions(positionsRef.current);
+        window.setTimeout(() => { draggedRef.current = false; }, 0);
+      }
+      return;
+    }
+    stopPan(event);
+  }
+
+  function blockDraggedNodeClick(event) {
+    if (!draggedRef.current) return;
+    event.preventDefault();
+    event.stopPropagation();
+    draggedRef.current = false;
+  }
+
+  function toggleHandTool() {
+    panRef.current = null;
+    nodeDragRef.current = null;
+    setPanning(false);
+    setDraggingNodeId(null);
+    const next = !handActive;
+    setHandActive(next);
+    if (next) setArrangeActive(false);
+  }
+
+  function toggleArrangeTool() {
+    panRef.current = null;
+    nodeDragRef.current = null;
+    setPanning(false);
+    setDraggingNodeId(null);
+    const next = !arrangeActive;
+    setArrangeActive(next);
+    if (next) setHandActive(false);
+  }
+
+  function toggleTopicSubtopics(topicId) {
+    setExpandedTopicId((current) => current === topicId ? null : topicId);
+  }
+
+  function resetNodePositions() {
+    const subjectNodeIds = new Set([
+      "study-map-root",
+      ...flattenNodes(tree).map((node) => String(node.id)),
+    ]);
+    const nextPositions = Object.fromEntries(
+      Object.entries(positionsRef.current).filter(([nodeId]) => !subjectNodeIds.has(nodeId)),
+    );
+    positionsRef.current = nextPositions;
+    setNodePositions(nextPositions);
+    saveMindMapPositions(nextPositions);
+  }
+
+  if (!tree.length) return null;
+  const byId = new Map(positionedNodes.map((node) => [node.id, node]));
+  const allNodes = flattenNodes(tree);
+  const topicCount = allNodes.filter((node) => node.node_type === "topic").length;
+  const subtopicCount = allNodes.filter((node) => node.node_type === "subtopic").length;
+  const hasCustomPositions = Boolean(
+    nodePositions["study-map-root"] || allNodes.some((node) => nodePositions[node.id]),
+  );
+  return (
+    <section ref={panelRef} className={`mindmap-panel ${fallbackFullscreen ? "fullscreen-fallback" : ""}`}>
+      <div className="mindmap-header">
+        <div>
+          <span className="kicker">{professionalMode ? "Global PDF map" : "Full study map"}</span>
+          <h3>{professionalMode ? "See the whole folder at once" : "See the whole subject at once"}</h3>
+        </div>
+        <div className="mindmap-header-side">
+          <div className="mindmap-summary">
+            <span><b>{topicCount}</b> topics</span>
+            <span><b>{subtopicCount}</b> content pages</span>
+          </div>
+          <div className="mindmap-tools" aria-label="Mind map tools">
+            <div className="mindmap-zoom-control" aria-label="Zoom controls">
+              <button type="button" onClick={() => changeZoom(zoom - zoomStep)} disabled={zoom <= minZoom} aria-label="Zoom out">−</button>
+              <input type="range" min={minZoom} max={maxZoom} step="0.05" value={zoom} onChange={(event) => changeZoom(Number(event.target.value))} aria-label="Mind map zoom" />
+              <button type="button" onClick={() => changeZoom(zoom + zoomStep)} disabled={zoom >= maxZoom} aria-label="Zoom in">+</button>
+              <output>{Math.round(zoom * 100)}%</output>
+            </div>
+            <button type="button" className={`mindmap-tool-button ${handActive ? "active" : ""}`} aria-pressed={handActive} onClick={toggleHandTool} title="Toggle hand tool">
+              <Icon name="hand" size={15} />
+              <span>Hand tool</span>
+            </button>
+            <button type="button" className={`mindmap-tool-button ${arrangeActive ? "active" : ""}`} aria-pressed={arrangeActive} onClick={toggleArrangeTool} title="Drag individual nodes">
+              <Icon name="move" size={15} />
+              <span>Arrange nodes</span>
+            </button>
+            <button type="button" className="mindmap-tool-button reset-layout-button" onClick={resetNodePositions} disabled={!hasCustomPositions} title="Restore automatic node positions">
+              <Icon name="layers" size={15} />
+              <span>Reset layout</span>
+            </button>
+            <button type="button" className="mindmap-tool-button" aria-pressed={isFullscreen} onClick={toggleFullscreen} title={isFullscreen ? "Exit full screen" : "Open full screen"}>
+              <Icon name="fullscreen" size={15} />
+              <span>{isFullscreen ? "Exit full screen" : "Full screen"}</span>
+            </button>
+          </div>
+        </div>
+      </div>
+      <div className="mindmap-legend" aria-label="Mind map legend">
+        <span><i className="legend-dot chapter" />Chapter</span>
+        <span><i className="legend-dot topic" />Topic</span>
+        <span><i className="legend-dot subtopic" />Subtopic · opens content</span>
+      </div>
+      <div
+        className={`mindmap-radial-scroll ${handActive ? "hand-tool" : ""} ${panning ? "panning" : ""} ${arrangeActive ? "arrange-tool" : ""} ${draggingNodeId !== null ? "dragging-node" : ""}`}
+        ref={scrollRef}
+        onPointerDown={startPan}
+        onPointerMove={movePointer}
+        onPointerUp={stopPointer}
+        onPointerCancel={stopPointer}
+        onClickCapture={blockDraggedNodeClick}
+        onDragStart={(event) => { if (handActive || arrangeActive) event.preventDefault(); }}
+      >
+        <div className="mindmap-zoom-stage" style={{ width: layout.size * zoom, height: layout.size * zoom }}>
+          <div className="mindmap-radial-canvas" style={{ width: layout.size, height: layout.size, transform: `translate(-50%, -50%) scale(${zoom})` }}>
+            <svg className="mindmap-radial-lines" width={layout.size} height={layout.size} viewBox={`0 0 ${layout.size} ${layout.size}`} aria-hidden="true">
+              {layout.edges.map((edge) => {
+                const source = byId.get(edge.source);
+                const target = byId.get(edge.target);
+                return <line key={`${edge.source}-${edge.target}`} x1={source.x} y1={source.y} x2={target.x} y2={target.y} className={`mindmap-line mindmap-line-${target.node_type}`} />;
+              })}
+            </svg>
+            {positionedNodes.map((node) => <RadialMindMapNode key={node.id} node={node} onNode={onNode} onTopicToggle={toggleTopicSubtopics} onMoveStart={startNodeMove} selectedId={selectedId} progressMap={progressMap} dragging={draggingNodeId === node.id} expanded={expandedTopicId === node.id} />)}
+          </div>
+        </div>
+      </div>
+      <p className="mindmap-hint">{arrangeActive ? "Arrange mode · drag any circle to place it · click a topic to reveal its subtopics" : expandedTopicId ? "Topic expanded · click a subtopic to open its content · click the topic again to close it" : handActive ? "Global map · click a topic to reveal its subtopics · drag to move the canvas" : "Global map · click a topic to reveal its subtopics"}</p>
+    </section>
+  );
+}
+
+function Overview({ detail, tree, onNode, rootTitle, selectedId, progressMap, startFullscreen, onFullscreenStarted, professionalMode = false }) {
   const children = detail ? findNode(tree, detail.id)?.children || [] : tree;
-  return <section className="overview-panel"><div className="overview-intro"><span className="kicker">{detail?.node_type === "chapter" ? "Chapter map" : "Topic map"}</span><h2>{detail?.title || "Your study map"}</h2><p>{detail?.node_type === "chapter" ? "Move through the branches below. Each leaf opens into notes, practice and a private AI tutor grounded in your material." : "Choose a subtopic to open its learning page."}</p></div><div className="child-grid">{children.map((child) => <button key={child.id} className="child-card" onClick={() => onNode(child.id)}><span className="child-card-index">{child.heading_number || "→"}</span><span><strong>{child.title}</strong><small>{child.node_type === "subtopic" ? "Open learning page" : `${child.children?.length || 0} subtopics`}</small></span><Icon name="arrow" size={16} /></button>)}</div>{!children.length && <div className="no-content"><Icon name="file" size={22} /><span>Upload a study PDF to draw the first branches.</span></div>}</section>;
+  return <section className="overview-panel"><div className="overview-intro"><span className="kicker">{detail?.node_type === "chapter" ? "Chapter map" : professionalMode ? "Global PDF map" : "Topic map"}</span><h2>{detail?.title || (professionalMode ? "Your global map" : "Your study map")}</h2><p>{detail?.node_type === "chapter" ? `Move through the branches below. Each leaf opens into notes, visualization, and a source-grounded AI tutor${professionalMode ? "." : ", plus practice."}` : "Choose any node in the complete structure. Every subtopic opens its own learning page."}</p></div><FullStudyMindMap tree={tree} onNode={onNode} rootTitle={rootTitle || detail?.breadcrumb?.[0]?.title || (professionalMode ? "Global map" : "Study map")} selectedId={selectedId} progressMap={progressMap} startFullscreen={startFullscreen} onFullscreenStarted={onFullscreenStarted} professionalMode={professionalMode} /><div className="child-grid">{children.map((child) => <a href={studyNodeHref(child)} key={child.id} className="child-card" onClick={(event) => { event.preventDefault(); updateStudyHash(child); onNode(child.id); }}><span className="child-card-index">{child.heading_number || "→"}</span><span><strong>{child.title}</strong><small>{child.node_type === "subtopic" ? "Open learning page" : `${child.children?.length || 0} subtopics`}</small></span><Icon name="arrow" size={16} /></a>)}</div>{!children.length && <div className="no-content"><Icon name="file" size={22} /><span>Upload a PDF to draw the first branches.</span></div>}</section>;
 }
 
-function LearningPage({ detail, content, tab, setTab, notes, noteText, setNoteText, onSaveNote, onUpdateNote, onDeleteNote, practice, onSubmitPractice, chatMessages, chatText, setChatText, onChat, chatBusy }) {
-  if (!detail) return <div className="loading-state"><span className="spinner" />Loading your study map...</div>;
-  if (detail.node_type !== "subtopic") return <Overview detail={detail} tree={[]} onNode={() => {}} />;
-  return <section className="learning-page"><div className="learning-tabs"><button className={tab === "learn" ? "active" : ""} onClick={() => setTab("learn")}><Icon name="sparkle" size={15} />Learn</button><button className={tab === "visualize" ? "active" : ""} onClick={() => setTab("visualize")}><Icon name="layers" size={15} />Visualize</button><button className={tab === "practice" ? "active" : ""} onClick={() => setTab("practice")}><Icon name="check" size={15} />Practice</button><button className={tab === "chat" ? "active" : ""} onClick={() => setTab("chat")}><Icon name="chat" size={15} />Ask tutor</button><button className={tab === "notes" ? "active" : ""} onClick={() => setTab("notes")}><Icon name="note" size={15} />My notes</button></div>{tab === "learn" && <LearnTab content={content} />}{tab === "visualize" && <VisualizationTab detail={detail} content={content} />}{tab === "practice" && <PracticeTab practice={practice} onSubmit={onSubmitPractice} />}{tab === "chat" && <ChatTab messages={chatMessages} text={chatText} setText={setChatText} onSend={onChat} busy={chatBusy} />}{tab === "notes" && <NotesTab notes={notes} text={noteText} setText={setNoteText} onSave={onSaveNote} onUpdate={onUpdateNote} onDelete={onDeleteNote} />}</section>;
+function LearningPage({ detail, content, tab, setTab, notes, noteDocument, noteText, setNoteText, onSaveNote, onUpdateNote, onDeleteNote, onSaveNoteDocument, onComposeNotes, practice, onSubmitPractice, chatMessages, chatText, setChatText, onChat, chatBusy, professionalMode = false }) {
+  if (!detail) return <div className="loading-state"><span className="spinner" />Loading your {professionalMode ? "global" : "study"} map...</div>;
+  if (detail.node_type !== "subtopic") return <Overview detail={detail} tree={[]} onNode={() => {}} professionalMode={professionalMode} />;
+  return (
+    <section className="learning-page">
+      <div className="learning-source-bar">
+        <span><Icon name="file" size={14} />Original source</span>
+        <div>
+          {detail.source_pages?.length ? detail.source_pages.map((source) => (
+            <a href={pdfSourceHref(source)} key={`${source.document_id}-${source.page_number}`} title={`Open ${source.filename} on page ${source.page_number}`}>
+              <strong>{source.filename}</strong>
+              <small>Page {source.page_number}</small>
+              <Icon name="external" size={13} />
+            </a>
+          )) : <small>Source page unavailable</small>}
+        </div>
+      </div>
+      <div className="learning-tabs"><button className={tab === "learn" ? "active" : ""} onClick={() => setTab("learn")}><Icon name="sparkle" size={15} />Learn</button><button className={tab === "visualize" ? "active" : ""} onClick={() => setTab("visualize")}><Icon name="layers" size={15} />Visualize</button>{!professionalMode && <button className={tab === "practice" ? "active" : ""} onClick={() => setTab("practice")}><Icon name="check" size={15} />Practice</button>}<button className={tab === "chat" ? "active" : ""} onClick={() => setTab("chat")}><Icon name="chat" size={15} />Ask tutor</button><button className={tab === "notes" ? "active" : ""} onClick={() => setTab("notes")}><Icon name="note" size={15} />My notes</button></div>
+      {tab === "learn" && <LearnTab content={content} />}
+      {tab === "visualize" && <VisualizationTab detail={detail} content={content} />}
+      {!professionalMode && tab === "practice" && <PracticeTab practice={practice} onSubmit={onSubmitPractice} />}
+      {tab === "chat" && <ChatTab messages={chatMessages} text={chatText} setText={setChatText} onSend={onChat} busy={chatBusy} />}
+      <div className="notes-tab-state" hidden={tab !== "notes"}>
+        <NotesTab notes={notes} noteDocument={noteDocument} text={noteText} setText={setNoteText} onSave={onSaveNote} onUpdate={onUpdateNote} onDelete={onDeleteNote} onSaveDocument={onSaveNoteDocument} onCompose={onComposeNotes} />
+      </div>
+    </section>
+  );
+}
+
+function StructuredNotes({ sections, keyPoints }) {
+  const visibleSections = sections?.length ? sections : [{ heading: "Key points", summary: "The most important ideas from this subtopic.", points: keyPoints || [] }];
+  return <article className="lesson-card structured-notes-card">
+    <div className="card-label"><span className="signal blue" />Structured notes</div>
+    <div className="structured-note-sections">{visibleSections.map((section, index) => <section key={`${section.heading}-${index}`}>
+      <h4>{section.heading}</h4>
+      {section.summary && <p className="structured-note-summary">{section.summary}</p>}
+      {section.points?.length > 0 && <ul>{section.points.map((point, pointIndex) => <li key={`${index}-${pointIndex}`}>{point}</li>)}</ul>}
+    </section>)}</div>
+  </article>;
 }
 
 function LearnTab({ content }) {
   if (!content) return <div className="no-content"><Icon name="sparkle" size={22} /><span>Learning content is still being prepared for this subtopic.</span></div>;
-  return <div className="learn-grid"><article className="lesson-card hero-lesson"><div className="card-label"><span className="signal blue" />The idea</div><h3>{content.explanation}</h3><div className="lesson-footer"><span><Icon name="sparkle" size={14} />AI-generated from your material</span><span>v{content.version}</span></div></article><article className="lesson-card analogy-card"><div className="card-label"><span className="signal amber" />Make it stick</div><h3>Analogy</h3><p>{content.analogy}</p></article><article className="lesson-card example-card"><div className="card-label"><span className="signal coral" />Try the shape</div><h3>Worked example</h3><p>{content.worked_example}</p></article><article className="lesson-card real-life-card"><div className="card-label"><span className="signal green" />See it around you</div><h3>Real-life example</h3><p>{content.real_life_example || "Regenerate this learning page to add a real-life application."}</p></article>{content.formulas?.length > 0 && <article className="lesson-card formula-card"><div className="card-label"><span className="signal green" />Formula desk</div>{content.formulas.map((formula, index) => <div className="formula-row" key={`${formula.expression}-${index}`}><code>{formula.expression}</code><p>{formula.symbols || formula.use_case}</p></div>)}</article>}<article className="lesson-card key-card"><div className="card-label"><span className="signal ink" />Remember</div><ul>{content.key_points?.map((point, index) => <li key={index}>{point}</li>)}</ul></article><article className="lesson-card question-card"><div className="card-label"><span className="signal coral" />Check yourself</div>{content.conceptual_questions?.map((question, index) => <p key={index}><span>0{index + 1}</span>{question}</p>)}</article></div>;
+  return <div className="learn-grid"><article className="lesson-card hero-lesson"><div className="card-label"><span className="signal blue" />The idea</div><h3>{content.explanation}</h3><div className="lesson-footer"><span><Icon name="sparkle" size={14} />AI-generated from your material</span><span>v{content.version}</span></div></article><StructuredNotes sections={content.structured_sections} keyPoints={content.key_points} /><article className="lesson-card analogy-card"><div className="card-label"><span className="signal amber" />Make it stick</div><h3>Analogy</h3><p>{content.analogy}</p></article><article className="lesson-card example-card"><div className="card-label"><span className="signal coral" />Try the shape</div><h3>Worked example</h3><p>{content.worked_example}</p></article><article className="lesson-card real-life-card"><div className="card-label"><span className="signal green" />See it around you</div><h3>Real-life example</h3><p>{content.real_life_example || "Regenerate this learning page to add a real-life application."}</p></article>{content.formulas?.length > 0 && <article className="lesson-card formula-card"><div className="card-label"><span className="signal green" />Formula desk</div>{content.formulas.map((formula, index) => <div className="formula-row" key={`${formula.expression}-${index}`}><code>{formula.expression}</code><p>{formula.symbols || formula.use_case}</p></div>)}</article>}<article className="lesson-card key-card"><div className="card-label"><span className="signal ink" />Remember</div><ul>{content.key_points?.map((point, index) => <li key={index}>{point}</li>)}</ul></article><article className="lesson-card question-card"><div className="card-label"><span className="signal coral" />Check yourself</div>{content.conceptual_questions?.map((question, index) => <p key={index}><span>0{index + 1}</span>{question}</p>)}</article></div>;
 }
 
 function VisualizationTab({ detail, content }) {
@@ -745,10 +1431,220 @@ function ChatTab({ messages, text, setText, onSend, busy }) {
   return <div className="chat-panel"><div className="chat-intro"><div className="tutor-avatar"><Icon name="sparkle" size={20} /></div><div><span className="kicker">Node tutor</span><h3>Ask this subtopic anything.</h3><p>The tutor is scoped to this leaf, so the answer stays close to your uploaded material.</p></div></div><div className="chat-messages">{!messages.length && <div className="chat-empty"><span>Try asking</span><button onClick={() => setText("Explain this with a simple analogy")}>“Explain this with a simple analogy”</button><button onClick={() => setText("What formula should I remember here?")}>“What formula should I remember here?”</button></div>}{messages.map((message, index) => <div className={`message ${message.role}`} key={index}><span className="message-label">{message.role === "user" ? "You" : "Tutor"}</span><p>{message.content}</p></div>)}</div><form className="chat-input" onSubmit={(e) => { e.preventDefault(); onSend(); }}><input value={text} onChange={(e) => setText(e.target.value)} placeholder="Ask about this subtopic..." /><button disabled={busy || !text.trim()}>{busy ? <span className="spinner small-spin" /> : <Icon name="arrow" size={17} />}</button></form></div>;
 }
 
-function NotesTab({ notes, text, setText, onSave, onUpdate, onDelete }) {
+const EMPTY_PROMPT_NOTES = {
+  overview: "",
+  sections: [],
+  key_points: [],
+  questions: [],
+};
+
+function normalizePromptNotes(value) {
+  return {
+    overview: value?.overview || "",
+    sections: (value?.sections || []).map((section) => ({
+      heading: section?.heading || "",
+      summary: section?.summary || "",
+      points: [...(section?.points || [])],
+    })),
+    key_points: [...(value?.key_points || [])],
+    questions: [...(value?.questions || [])],
+  };
+}
+
+function listFromEditor(value) {
+  return value.split("\n");
+}
+
+function cleanPromptNotes(value) {
+  return {
+    overview: value.overview.trim(),
+    sections: value.sections.map((section, index) => ({
+      heading: section.heading.trim() || `Section ${index + 1}`,
+      summary: section.summary.trim(),
+      points: section.points.map((item) => item.trim()).filter(Boolean),
+    })),
+    key_points: value.key_points.map((item) => item.trim()).filter(Boolean),
+    questions: value.questions.map((item) => item.trim()).filter(Boolean),
+  };
+}
+
+function StructuredNoteEditor({ value, onChange, disabled }) {
+  function changeSection(index, field, nextValue) {
+    const sections = value.sections.map((section, sectionIndex) => (
+      sectionIndex === index ? { ...section, [field]: nextValue } : section
+    ));
+    onChange({ ...value, sections });
+  }
+
+  function removeSection(index) {
+    onChange({ ...value, sections: value.sections.filter((_, sectionIndex) => sectionIndex !== index) });
+  }
+
+  function addSection() {
+    onChange({
+      ...value,
+      sections: [...value.sections, { heading: "New section", summary: "", points: [] }],
+    });
+  }
+
+  return (
+    <div className="structured-note-editor">
+      <label className="note-editor-field">
+        <span>Overview</span>
+        <textarea
+          disabled={disabled}
+          maxLength={8000}
+          value={value.overview}
+          onChange={(event) => onChange({ ...value, overview: event.target.value })}
+          placeholder="A clear overview of this subtopic..."
+        />
+      </label>
+
+      <div className="note-section-list">
+        {value.sections.map((section, index) => (
+          <article className="note-section-editor" key={`note-section-${index}`}>
+            <div className="note-section-editor-head">
+              <span>Section {String(index + 1).padStart(2, "0")}</span>
+              <button type="button" disabled={disabled} onClick={() => removeSection(index)} title="Remove section">
+                <Icon name="trash" size={14} />
+              </button>
+            </div>
+            <input
+              disabled={disabled}
+              maxLength={240}
+              aria-label={`Section ${index + 1} heading`}
+              value={section.heading}
+              onChange={(event) => changeSection(index, "heading", event.target.value)}
+              placeholder="Section heading"
+            />
+            <textarea
+              disabled={disabled}
+              maxLength={4000}
+              aria-label={`Section ${index + 1} summary`}
+              value={section.summary}
+              onChange={(event) => changeSection(index, "summary", event.target.value)}
+              placeholder="Short explanation..."
+            />
+            <label className="note-editor-field compact">
+              <span>Points · one per line</span>
+              <textarea
+                disabled={disabled}
+                value={section.points.join("\n")}
+                onChange={(event) => changeSection(index, "points", listFromEditor(event.target.value))}
+                placeholder={"First important point\nSecond important point"}
+              />
+            </label>
+          </article>
+        ))}
+      </div>
+
+      <button className="note-add-section" type="button" disabled={disabled} onClick={addSection}>
+        <Icon name="plus" size={14} />Add section
+      </button>
+
+      <div className="note-list-editors">
+        <label className="note-editor-field">
+          <span>Key points · one per line</span>
+          <textarea
+            disabled={disabled}
+            value={value.key_points.join("\n")}
+            onChange={(event) => onChange({ ...value, key_points: listFromEditor(event.target.value) })}
+            placeholder="What must you remember?"
+          />
+        </label>
+        <label className="note-editor-field">
+          <span>Active-recall questions · one per line</span>
+          <textarea
+            disabled={disabled}
+            value={value.questions.join("\n")}
+            onChange={(event) => onChange({ ...value, questions: listFromEditor(event.target.value) })}
+            placeholder="What should you be able to answer?"
+          />
+        </label>
+      </div>
+    </div>
+  );
+}
+
+function NotesTab({ notes, noteDocument, text, setText, onSave, onUpdate, onDelete, onSaveDocument, onCompose }) {
   const [editingId, setEditingId] = useState(null);
   const [editingText, setEditingText] = useState("");
   const [savingId, setSavingId] = useState(null);
+  const [draft, setDraft] = useState(() => normalizePromptNotes(noteDocument?.notes || EMPTY_PROMPT_NOTES));
+  const [instruction, setInstruction] = useState("");
+  const [composing, setComposing] = useState(false);
+  const [savingDocument, setSavingDocument] = useState(false);
+  const [dirty, setDirty] = useState(false);
+  const [previousDraft, setPreviousDraft] = useState(null);
+  const [composerMessage, setComposerMessage] = useState("");
+  const [composerHistory, setComposerHistory] = useState([]);
+  const [documentError, setDocumentError] = useState("");
+
+  useEffect(() => {
+    setDraft(normalizePromptNotes(noteDocument?.notes || EMPTY_PROMPT_NOTES));
+    setDirty(false);
+    setPreviousDraft(null);
+    setComposerMessage("");
+    setDocumentError("");
+  }, [noteDocument?.node_id, noteDocument?.version]);
+
+  useEffect(() => {
+    setComposerHistory([]);
+  }, [noteDocument?.node_id]);
+
+  function changeDraft(nextDraft) {
+    setDraft(nextDraft);
+    setDirty(true);
+  }
+
+  async function saveDocument() {
+    setSavingDocument(true);
+    setDocumentError("");
+    try {
+      const saved = await onSaveDocument(cleanPromptNotes(draft));
+      setDraft(normalizePromptNotes(saved.notes));
+      setDirty(false);
+      setComposerMessage("Saved to this subtopic.");
+    } catch (error) {
+      setDocumentError(error.message || "Structured notes could not be saved.");
+    } finally {
+      setSavingDocument(false);
+    }
+  }
+
+  async function composeDocument(event) {
+    event.preventDefault();
+    const prompt = instruction.trim();
+    if (!prompt) return;
+    setComposing(true);
+    setDocumentError("");
+    setComposerMessage("");
+    try {
+      const result = await onCompose(cleanPromptNotes(draft), prompt);
+      setPreviousDraft(normalizePromptNotes(draft));
+      setDraft(normalizePromptNotes(result.notes));
+      setInstruction("");
+      setDirty(true);
+      setComposerMessage(result.message || "Notes reshaped. Review them, then save.");
+      setComposerHistory((items) => [
+        ...items,
+        { role: "user", content: prompt },
+        { role: "assistant", content: result.message || "Notes reshaped. Review them, then save." },
+      ]);
+    } catch (error) {
+      setDocumentError(error.message || "The notes editor could not apply that prompt.");
+    } finally {
+      setComposing(false);
+    }
+  }
+
+  function undoCompose() {
+    if (!previousDraft) return;
+    setDraft(previousDraft);
+    setPreviousDraft(null);
+    setDirty(true);
+    setComposerMessage("Last AI edit undone.");
+  }
 
   function beginEdit(note) {
     setEditingId(note.id);
@@ -768,53 +1664,137 @@ function NotesTab({ notes, text, setText, onSave, onUpdate, onDelete }) {
   }
 
   return (
-    <div className="notes-panel">
-      <div className="notes-heading">
+    <div className="notes-studio">
+      <div className="notes-studio-heading">
         <div>
-          <span className="kicker">Private layer</span>
-          <h3>Your notes</h3>
-          <p>Keep your own thinking beside the generated lesson.</p>
+          <span className="kicker">Prompt notes maker</span>
+          <h3>Your structured notes</h3>
+          <p>Edit directly or tell the AI how to reshape the same source-grounded notes.</p>
         </div>
-        <Icon name="note" size={22} />
+        <div className="notes-document-actions">
+          <span className={`note-save-state ${dirty ? "unsaved" : ""}`}>
+            {dirty ? "Unsaved changes" : noteDocument?.saved ? `Saved · v${noteDocument.version}` : "Built from lesson"}
+          </span>
+          <button className="primary-button" disabled={savingDocument || !dirty} onClick={saveDocument}>
+            {savingDocument ? <span className="spinner small-spin" /> : <Icon name="check" size={15} />}
+            {savingDocument ? "Saving..." : "Save notes"}
+          </button>
+        </div>
       </div>
-      <textarea value={text} onChange={(event) => setText(event.target.value)} placeholder="Write a memory hook, question, or connection..." />
-      <div className="notes-actions">
-        <span>Only visible to you</span>
-        <button className="secondary-button" disabled={!text.trim()} onClick={onSave}>
-          <Icon name="check" size={15} />Save note
-        </button>
-      </div>
-      <div className="saved-notes">
-        {notes.map((note) => (
-          <article className="saved-note" key={note.id}>
-            {editingId === note.id ? (
-              <textarea className="saved-note-editor" value={editingText} onChange={(event) => setEditingText(event.target.value)} />
-            ) : (
-              <p>{note.content}</p>
+
+      <div className="notes-studio-grid">
+        <section className="structured-note-workspace">
+          <div className="notes-pane-label">
+            <span><Icon name="note" size={15} />Notes document</span>
+            <small>Everything here stays editable</small>
+          </div>
+          <StructuredNoteEditor value={draft} onChange={changeDraft} disabled={composing} />
+        </section>
+
+        <aside className="note-prompt-panel">
+          <div className="note-prompt-topbar">
+            <span><Icon name="sparkle" size={14} />AI notes editor</span>
+            <small>Same model as Ask Tutor</small>
+          </div>
+          <div className="note-prompt-conversation">
+            <div className="note-assistant-message">
+              <div className="prompt-model-badge"><Icon name="sparkle" size={14} />Source-grounded</div>
+              <p>I can reshape the structured notes on the left. Ask me to shorten them, change their format, simplify an explanation, or create revision questions.</p>
+            </div>
+            {composerHistory.map((message, index) => (
+              <div className={`note-conversation-entry ${message.role}`} key={`${message.role}-${index}`}>
+                <span>{message.role === "user" ? "You" : "Notes editor"}</span>
+                <p>{message.content}</p>
+              </div>
+            ))}
+            {(documentError || (composerMessage && !composerHistory.length)) && (
+              <div className={`note-composer-message ${documentError ? "error" : ""}`} aria-live="polite">
+                {documentError || composerMessage}
+              </div>
             )}
-            {editingId === note.id ? (
-              <div className="saved-note-actions">
-                <button disabled={savingId === note.id || !editingText.trim()} onClick={() => saveEdit(note.id)}>
-                  {savingId === note.id ? "Saving..." : "Save"}
+            <div className="note-prompt-examples">
+              {[
+                "Make this concise",
+                "Turn this into exam notes",
+                "Simplify the explanations",
+                "Add active-recall questions",
+              ].map((example) => (
+                <button type="button" key={example} onClick={() => setInstruction(example)}>{example}</button>
+              ))}
+            </div>
+          </div>
+          <div className="note-prompt-composer">
+            <form onSubmit={composeDocument}>
+              <textarea
+                value={instruction}
+                disabled={composing}
+                maxLength={4000}
+                onChange={(event) => setInstruction(event.target.value)}
+                placeholder="Ask the notes editor..."
+              />
+              <div className="note-prompt-composer-actions">
+                <span><Icon name="plus" size={15} />Prompt</span>
+                <button className="prompt-apply-button" disabled={composing || !instruction.trim()} title="Apply prompt to notes">
+                  {composing ? <span className="spinner small-spin" /> : <Icon name="arrow" size={16} />}
                 </button>
-                <button onClick={() => { setEditingId(null); setEditingText(""); }}>Cancel</button>
               </div>
-            ) : (
-              <div className="saved-note-actions">
-                <small>{formatDate(note.updated_at, { month: "short", day: "numeric", year: "numeric" })}</small>
-                <button onClick={() => beginEdit(note)}>Edit</button>
-                <button onClick={() => onDelete(note.id)}>Delete</button>
-              </div>
-            )}
-          </article>
-        ))}
-        {!notes.length && <p className="muted">Your first note will appear here.</p>}
+            </form>
+            <div className="note-composer-footer">
+              {previousDraft ? <button className="note-undo-button" type="button" onClick={undoCompose}>Undo last AI edit</button> : <span />}
+              <span className="note-grounding-status"><span className="signal green" />This subtopic only</span>
+            </div>
+          </div>
+        </aside>
       </div>
+
+      <section className="notes-panel scratch-notes-panel">
+        <div className="notes-heading">
+          <div>
+            <span className="kicker">Quick private notes</span>
+            <h3>Scratchpad</h3>
+            <p>Keep a memory hook, question, or personal connection outside the main notes document.</p>
+          </div>
+          <Icon name="note" size={22} />
+        </div>
+        <textarea value={text} onChange={(event) => setText(event.target.value)} placeholder="Write a memory hook, question, or connection..." />
+        <div className="notes-actions">
+          <span>Only visible to you</span>
+          <button className="secondary-button" disabled={!text.trim()} onClick={onSave}>
+            <Icon name="check" size={15} />Save quick note
+          </button>
+        </div>
+        <div className="saved-notes">
+          {notes.map((note) => (
+            <article className="saved-note" key={note.id}>
+              {editingId === note.id ? (
+                <textarea className="saved-note-editor" value={editingText} onChange={(event) => setEditingText(event.target.value)} />
+              ) : (
+                <p>{note.content}</p>
+              )}
+              {editingId === note.id ? (
+                <div className="saved-note-actions">
+                  <button disabled={savingId === note.id || !editingText.trim()} onClick={() => saveEdit(note.id)}>
+                    {savingId === note.id ? "Saving..." : "Save"}
+                  </button>
+                  <button onClick={() => { setEditingId(null); setEditingText(""); }}>Cancel</button>
+                </div>
+              ) : (
+                <div className="saved-note-actions">
+                  <small>{formatDate(note.updated_at, { month: "short", day: "numeric", year: "numeric" })}</small>
+                  <button onClick={() => beginEdit(note)}>Edit</button>
+                  <button onClick={() => onDelete(note.id)}>Delete</button>
+                </div>
+              )}
+            </article>
+          ))}
+          {!notes.length && <p className="muted">Your first quick note will appear here.</p>}
+        </div>
+      </section>
     </div>
   );
 }
 
-function UploadModal({ subject, token, onClose, onDone }) {
+function UploadModal({ subject, token, onClose, onDone, professionalMode = false }) {
   const [kind, setKind] = useState("study");
   const [file, setFile] = useState(null);
   const [busy, setBusy] = useState(false);
@@ -865,11 +1845,12 @@ function UploadModal({ subject, token, onClose, onDone }) {
   }[stage];
   const progressStage = stage === "complete" ? 3 : stage === "preparing" || stage === "mapping" ? 2 : stage === "indexing" ? 1 : 0;
 
-  return <div className="modal-backdrop" onMouseDown={(event) => event.target === event.currentTarget && !busy && stage !== "complete" && onClose()}><div className="modal-card upload-modal"><button className="modal-close" disabled={busy || stage === "complete"} onClick={onClose}><Icon name="close" size={18} /></button><div className={`modal-icon ${stage === "complete" ? "complete" : ""}`}><Icon name={stage === "complete" ? "check" : "upload"} size={24} /></div><p className="eyebrow">Add material</p><h2>{stage === "complete" ? "Material is ready." : "Feed the subject."}</h2><p className="modal-copy">{stage === "complete" ? "Your study space has been updated." : "Study PDFs grow the map. Assignment PDFs become scoped practice."}</p><div className="upload-switch"><button type="button" disabled={busy || stage === "complete"} className={kind === "study" ? "active" : ""} onClick={() => setKind("study")}><Icon name="book" size={16} />Study PDF</button><button type="button" disabled={busy || stage === "complete"} className={kind === "assignment" ? "active" : ""} onClick={() => setKind("assignment")}><Icon name="file" size={16} />Assignment PDF</button></div><form onSubmit={upload}><label className={`dropzone ${file ? "has-file" : ""}`}><input disabled={busy || stage === "complete"} type="file" accept="application/pdf,.pdf" onChange={(event) => setFile(event.target.files?.[0])} />{file ? <><Icon name="check" size={26} /><strong>{file.name}</strong><span>{stage === "idle" ? "Ready to process" : statusText}</span></> : <><Icon name="upload" size={26} /><strong>Drop a PDF here</strong><span>or click to browse</span></>}</label>{(busy || stage === "complete") && <div className={`upload-status ${stage}`}><div className="upload-status-heading"><span className="spinner upload-spinner" />{statusText}</div><div className="upload-steps"><span className={progressStage >= 1 ? "done" : ""}>Upload</span><span className={progressStage >= 2 ? "done" : ""}>Index</span><span className={progressStage >= 3 ? "done" : ""}>Ready</span></div><small>Please keep this window open until processing is complete.</small></div>}{error && <div className="form-error">{error}</div>}<button className="primary-button full" disabled={!file || busy || stage === "complete"}>{stage === "complete" ? "Completed" : busy ? statusText : "Process PDF"}{stage === "complete" ? <Icon name="check" size={17} /> : <Icon name="arrow" size={17} />}</button></form></div></div>;
+  return <div className="modal-backdrop" onMouseDown={(event) => event.target === event.currentTarget && !busy && stage !== "complete" && onClose()}><div className="modal-card upload-modal"><button className="modal-close" disabled={busy || stage === "complete"} onClick={onClose}><Icon name="close" size={18} /></button><div className={`modal-icon ${stage === "complete" ? "complete" : ""}`}><Icon name={stage === "complete" ? "check" : "upload"} size={24} /></div><p className="eyebrow">{professionalMode ? "Add reference" : "Add material"}</p><h2>{stage === "complete" ? "PDF is ready." : professionalMode ? `Add a PDF to ${subject?.name || "this folder"}.` : "Feed the subject."}</h2><p className="modal-copy">{stage === "complete" ? `Your ${professionalMode ? "folder" : "study space"} has been updated.` : professionalMode ? "The PDF will be indexed, added to the folder, and connected to its global knowledge map." : "Study PDFs grow the map. Assignment PDFs become scoped practice."}</p>{!professionalMode && <div className="upload-switch"><button type="button" disabled={busy || stage === "complete"} className={kind === "study" ? "active" : ""} onClick={() => setKind("study")}><Icon name="book" size={16} />Study PDF</button><button type="button" disabled={busy || stage === "complete"} className={kind === "assignment" ? "active" : ""} onClick={() => setKind("assignment")}><Icon name="file" size={16} />Assignment PDF</button></div>}<form onSubmit={upload}><label className={`dropzone ${file ? "has-file" : ""}`}><input disabled={busy || stage === "complete"} type="file" accept="application/pdf,.pdf" onChange={(event) => setFile(event.target.files?.[0])} />{file ? <><Icon name="check" size={26} /><strong>{file.name}</strong><span>{stage === "idle" ? "Ready to process" : statusText}</span></> : <><Icon name="upload" size={26} /><strong>Drop a PDF here</strong><span>or click to browse</span></>}</label>{(busy || stage === "complete") && <div className={`upload-status ${stage}`}><div className="upload-status-heading"><span className="spinner upload-spinner" />{statusText}</div><div className="upload-steps"><span className={progressStage >= 1 ? "done" : ""}>Upload</span><span className={progressStage >= 2 ? "done" : ""}>Index</span><span className={progressStage >= 3 ? "done" : ""}>Ready</span></div><small>Please keep this window open until processing is complete.</small></div>}{error && <div className="form-error">{error}</div>}<button className="primary-button full" disabled={!file || busy || stage === "complete"}>{stage === "complete" ? "Completed" : busy ? statusText : "Process PDF"}{stage === "complete" ? <Icon name="check" size={17} /> : <Icon name="arrow" size={17} />}</button></form></div></div>;
 }
 
 function WorkspaceModal({ kind, semesters, selectedSemesterId, token, onClose, onCreated }) {
-  const isSubject = kind === "subject";
+  const isFolder = kind === "folder";
+  const isSubject = kind === "subject" || isFolder;
   const [name, setName] = useState("");
   const [description, setDescription] = useState("");
   const [semesterId, setSemesterId] = useState(String(selectedSemesterId || semesters[0]?.id || ""));
@@ -897,7 +1878,7 @@ function WorkspaceModal({ kind, semesters, selectedSemesterId, token, onClose, o
     }
   }
 
-  return <div className="modal-backdrop" onMouseDown={(event) => event.target === event.currentTarget && onClose()}><div className="modal-card workspace-modal"><button className="modal-close" onClick={onClose}><Icon name="close" size={18} /></button><div className="modal-icon"><Icon name={isSubject ? "book" : "layers"} size={24} /></div><p className="eyebrow">New {isSubject ? "subject" : "semester"}</p><h2>{isSubject ? "Open a new subject." : "Set a new term."}</h2><p className="modal-copy">{isSubject ? "Give the subject a home before uploading its study material." : "Keep subjects and revision plans grouped by semester."}</p><form className="stack-form" onSubmit={submit}><label>Name<input required autoFocus value={name} onChange={(event) => setName(event.target.value)} placeholder={isSubject ? "e.g. Physics" : "e.g. Semester 2"} /></label>{isSubject && <label>Semester<select value={semesterId} onChange={(event) => setSemesterId(event.target.value)}>{semesters.map((semester) => <option value={semester.id} key={semester.id}>{semester.name}</option>)}</select></label>}<label>Description <span className="optional-label">optional</span><textarea value={description} onChange={(event) => setDescription(event.target.value)} rows="3" placeholder="A short description" /></label>{error && <div className="form-error">{error}</div>}<button className="primary-button full" disabled={busy}>{busy ? "Creating..." : `Create ${isSubject ? "subject" : "semester"}`}<Icon name="arrow" size={17} /></button></form></div></div>;
+  return <div className="modal-backdrop" onMouseDown={(event) => event.target === event.currentTarget && onClose()}><div className="modal-card workspace-modal"><button className="modal-close" onClick={onClose}><Icon name="close" size={18} /></button><div className="modal-icon"><Icon name={isSubject ? "book" : "layers"} size={24} /></div><p className="eyebrow">New {isFolder ? "folder" : isSubject ? "subject" : "semester"}</p><h2>{isFolder ? "Create a PDF folder." : isSubject ? "Open a new subject." : "Set a new term."}</h2><p className="modal-copy">{isFolder ? "Group related professional references and their generated knowledge map." : isSubject ? "Give the subject a home before uploading its study material." : "Keep subjects and revision plans grouped by semester."}</p><form className="stack-form" onSubmit={submit}><label>Name<input required autoFocus value={name} onChange={(event) => setName(event.target.value)} placeholder={isFolder ? "e.g. Client research" : isSubject ? "e.g. Physics" : "e.g. Semester 2"} /></label>{isSubject && !isFolder && <label>Semester<select value={semesterId} onChange={(event) => setSemesterId(event.target.value)}>{semesters.map((semester) => <option value={semester.id} key={semester.id}>{semester.name}</option>)}</select></label>}<label>Description <span className="optional-label">optional</span><textarea value={description} onChange={(event) => setDescription(event.target.value)} rows="3" placeholder="A short description" /></label>{error && <div className="form-error">{error}</div>}<button className="primary-button full" disabled={busy}>{busy ? "Creating..." : `Create ${isFolder ? "folder" : isSubject ? "subject" : "semester"}`}<Icon name="arrow" size={17} /></button></form></div></div>;
 }
 
 function LectureWorkspace({ subjectId, token, lectures, selectedLectureId, onCreate, onSelect, onRefresh, onDelete, onNotify }) {
@@ -1104,6 +2085,100 @@ function TestModal({ test, subjectId, token, onClose, onSubmitted }) {
   return <div className="modal-backdrop"><div className="modal-card test-modal"><button className="modal-close" onClick={onClose}><Icon name="close" size={18} /></button>{result ? <div className="result-view"><div className="result-ring"><strong>{Math.round(result.percentage)}%</strong><span>score</span></div><p className="eyebrow">Test submitted</p><h2>{result.percentage >= 70 ? "That knowledge is holding." : "A useful first signal."}</h2><p>You scored {result.score} out of {result.max_score}. {result.analytics?.weak_concepts?.length ? `Revisit: ${result.analytics.weak_concepts.join(", ")}.` : "No weak concepts detected."}</p><button className="primary-button" onClick={onClose}>Back to today <Icon name="arrow" size={17} /></button></div> : <><div className="test-modal-head"><div><span className="eyebrow">Proctored-style test</span><h2>{test.title || test.node_title}</h2></div><span className="test-deadline">{test.status === "overdue" ? formatOverdue(test.days_overdue) : `Due ${formatDate(test.due_at)}`}</span></div><form onSubmit={submit} className="test-form">{test.questions.map((question, index) => <fieldset key={question.id}><legend><span>{String(index + 1).padStart(2, "0")}</span>{question.question}</legend><div className="test-options">{question.options.map((option) => <label key={option} className={answers[question.id] === option ? "chosen" : ""}><input required name={`question-${question.id}`} type="radio" value={option} checked={answers[question.id] === option} onChange={(e) => setAnswers({ ...answers, [question.id]: e.target.value })} /><span>{option}</span></label>)}</div></fieldset>)}<button className="primary-button full" disabled={busy}>{busy ? "Scoring..." : "Submit test"}<Icon name="arrow" size={17} /></button></form></>}</div></div>;
 }
 
+function PdfViewer({ subjectId, documentItem, token, initialPage = 1, onClose }) {
+  const viewerRef = useRef(null);
+  const [pdfUrl, setPdfUrl] = useState("");
+  const [loadError, setLoadError] = useState("");
+  const [viewerFullscreen, setViewerFullscreen] = useState(() => Boolean(document.fullscreenElement));
+
+  useEffect(() => {
+    let cancelled = false;
+    let objectUrl = "";
+    setPdfUrl("");
+    setLoadError("");
+
+    api.documentPdf(subjectId, documentItem.id, token)
+      .then((blob) => {
+        objectUrl = URL.createObjectURL(blob);
+        if (cancelled) {
+          URL.revokeObjectURL(objectUrl);
+          return;
+        }
+        setPdfUrl(objectUrl);
+      })
+      .catch((err) => {
+        if (!cancelled) setLoadError(err.message || "The PDF could not be opened.");
+      });
+
+    return () => {
+      cancelled = true;
+      if (objectUrl) URL.revokeObjectURL(objectUrl);
+    };
+  }, [subjectId, documentItem.id, token]);
+
+  useEffect(() => {
+    const syncFullscreen = () => setViewerFullscreen(Boolean(document.fullscreenElement));
+    const handleKeyDown = (event) => {
+      if (event.key === "Escape" && !document.fullscreenElement) onClose();
+    };
+    document.addEventListener("fullscreenchange", syncFullscreen);
+    window.addEventListener("keydown", handleKeyDown);
+    return () => {
+      document.removeEventListener("fullscreenchange", syncFullscreen);
+      window.removeEventListener("keydown", handleKeyDown);
+    };
+  }, [onClose]);
+
+  async function toggleViewerFullscreen() {
+    try {
+      if (document.fullscreenElement) {
+        await document.exitFullscreen();
+      } else {
+        await viewerRef.current?.requestFullscreen();
+      }
+    } catch {
+      setLoadError("Browser fullscreen was blocked. The PDF is still filling the app window.");
+    }
+  }
+
+  const viewerUrl = pdfUrl ? `${pdfUrl}#page=${Math.max(1, initialPage)}&view=FitH` : "";
+
+  return (
+    <section className="pdf-viewer-shell" ref={viewerRef} aria-label={`PDF viewer for ${documentItem.filename}`}>
+      <header className="pdf-viewer-bar">
+        <button className="pdf-back-button" onClick={onClose} title="Back to Study OS">
+          <Icon name="arrow" size={16} />
+          <span>Back</span>
+        </button>
+        <div className="pdf-viewer-title">
+          <Icon name="file" size={16} />
+          <strong title={documentItem.filename}>{documentItem.filename}</strong>
+          <span>Page {Math.max(1, initialPage)}</span>
+        </div>
+        <div className="pdf-viewer-actions">
+          <button onClick={() => window.open(viewerUrl, "_blank", "noopener,noreferrer")} disabled={!viewerUrl} title="Open PDF in a new tab">
+            <Icon name="external" size={16} />
+            <span>Open</span>
+          </button>
+          <a className={!pdfUrl ? "disabled" : ""} href={pdfUrl || undefined} download={documentItem.filename} aria-disabled={!pdfUrl} title="Download PDF">
+            <Icon name="download" size={16} />
+            <span>Download</span>
+          </a>
+          <button className={viewerFullscreen ? "active" : ""} onClick={toggleViewerFullscreen} title={viewerFullscreen ? "Exit fullscreen" : "View PDF fullscreen"}>
+            <Icon name="fullscreen" size={16} />
+            <span>{viewerFullscreen ? "Exit" : "Fullscreen"}</span>
+          </button>
+        </div>
+      </header>
+      <div className="pdf-viewer-surface">
+        {!pdfUrl && !loadError && <div className="pdf-viewer-state"><span className="spinner" />Opening PDF...</div>}
+        {loadError && <div className="pdf-viewer-state error" role="alert"><Icon name="file" size={28} /><strong>PDF unavailable</strong><p>{loadError}</p><button onClick={onClose}>Back to Study OS</button></div>}
+        {viewerUrl && <iframe className="pdf-frame" src={viewerUrl} title={`${documentItem.filename}, page ${Math.max(1, initialPage)}`} />}
+      </div>
+    </section>
+  );
+}
+
 function App() {
   const [session, setSession] = useState(() => {
     const token = localStorage.getItem("study_token");
@@ -1119,11 +2194,14 @@ function App() {
   const [detail, setDetail] = useState(null);
   const [content, setContent] = useState(null);
   const [notes, setNotes] = useState([]);
+  const [noteDocument, setNoteDocument] = useState(null);
   const [practice, setPractice] = useState([]);
   const [progressRows, setProgressRows] = useState([]);
   const [plan, setPlan] = useState({ revisions: [], topic_tests: [], practice_sets: [] });
   const [assignments, setAssignments] = useState([]);
   const [documents, setDocuments] = useState([]);
+  const [selectedDocumentId, setSelectedDocumentId] = useState(null);
+  const [selectedPdfPage, setSelectedPdfPage] = useState(1);
   const [lectures, setLectures] = useState([]);
   const [view, setView] = useState("map");
   const [selectedLectureId, setSelectedLectureId] = useState(null);
@@ -1138,11 +2216,43 @@ function App() {
   const [workspaceModal, setWorkspaceModal] = useState(null);
   const [activeTest, setActiveTest] = useState(null);
   const [llmProvider, setLlmProvider] = useState(() => localStorage.getItem("study_llm_provider") || "openai");
+  const [darkMode, setDarkMode] = useState(() => {
+    const savedTheme = localStorage.getItem("study_theme");
+    return savedTheme ? savedTheme === "dark" : window.matchMedia?.("(prefers-color-scheme: dark)").matches;
+  });
+  const [appFullscreen, setAppFullscreen] = useState(() => document.fullscreenElement === document.documentElement);
   const [error, setError] = useState("");
 
   const selectedSemester = semesters.find((semester) => semester.id === selectedSemesterId);
   const selectedSubject = subjects.find((subject) => subject.id === selectedSubjectId);
+  const selectedDocument = documents.find((item) => item.id === selectedDocumentId);
+  const isProfessional = session?.user?.account_type === "professional";
   const progressMap = useMemo(() => Object.fromEntries(progressRows.map((row) => [row.node_id, row])), [progressRows]);
+
+  useEffect(() => {
+    document.documentElement.dataset.theme = darkMode ? "dark" : "light";
+    document.documentElement.style.colorScheme = darkMode ? "dark" : "light";
+    localStorage.setItem("study_theme", darkMode ? "dark" : "light");
+  }, [darkMode]);
+
+  useEffect(() => {
+    const syncFullscreen = () => setAppFullscreen(document.fullscreenElement === document.documentElement);
+    document.addEventListener("fullscreenchange", syncFullscreen);
+    return () => document.removeEventListener("fullscreenchange", syncFullscreen);
+  }, []);
+
+  useEffect(() => {
+    if (!session?.token) return;
+    let cancelled = false;
+    api.me(session.token)
+      .then((user) => {
+        if (cancelled) return;
+        localStorage.setItem("study_user", JSON.stringify(user));
+        setSession((current) => current ? { ...current, user } : current);
+      })
+      .catch(() => {});
+    return () => { cancelled = true; };
+  }, [session?.token]);
 
   function notify(message) {
     setToast(message);
@@ -1162,6 +2272,18 @@ function App() {
     notify(`${provider === "deepseek" ? "DeepSeek V4 Flash" : "OpenAI"} selected.`);
   }
 
+  async function toggleAppFullscreen() {
+    try {
+      if (document.fullscreenElement) {
+        await document.exitFullscreen();
+      } else if (document.documentElement.requestFullscreen) {
+        await document.documentElement.requestFullscreen();
+      }
+    } catch {
+      notify("Browser fullscreen was blocked. The app is still using the full window.");
+    }
+  }
+
   async function handleWorkspaceCreated(item, kind) {
     setWorkspaceModal(null);
     if (kind === "semester") {
@@ -1179,7 +2301,7 @@ function App() {
     setView("map");
     setSubjects((items) => items.some((subject) => subject.id === item.id) ? items : [...items, item]);
     await loadSubject(item.id);
-    notify("Subject created.");
+    notify(kind === "folder" ? "Folder created." : "Subject created.");
   }
 
   async function loadSemesters() {
@@ -1189,7 +2311,11 @@ function App() {
       const nextId = result.some((item) => item.id === selectedSemesterId) ? selectedSemesterId : result[0]?.id || null;
       setSelectedSemesterId(nextId);
       if (nextId) localStorage.setItem("study_semester", nextId);
-    } catch (err) { setError(err.message); }
+      return nextId;
+    } catch (err) {
+      setError(err.message);
+      return null;
+    }
   }
 
   async function loadSubjects(semesterId = selectedSemesterId) {
@@ -1208,6 +2334,33 @@ function App() {
     setLoading(true);
     setError("");
     try {
+      if (isProfessional) {
+        const [treeResult, documentsResult] = await Promise.allSettled([
+          api.tree(subjectId, session.token),
+          api.documents(subjectId, session.token),
+        ]);
+        if (treeResult.status === "fulfilled") {
+          const nextTree = treeResult.value;
+          setTree(nextTree);
+          const linkedNode = findNode(nextTree, studyNodeIdFromHash());
+          const current = linkedNode || findNode(nextTree, selectedNodeId);
+          setSelectedNodeId(current?.id || null);
+        }
+        if (documentsResult.status === "fulfilled") setDocuments(documentsResult.value);
+        setPlan({ revisions: [], topic_tests: [], practice_sets: [] });
+        setProgressRows([]);
+        setAssignments([]);
+        setLectures([]);
+        setSelectedLectureId(null);
+        const failedSections = [
+          ["global map", treeResult],
+          ["PDFs", documentsResult],
+        ].filter(([, result]) => result.status === "rejected");
+        if (failedSections.length) {
+          setError(`Could not load ${failedSections.map(([name]) => name).join(", ")}.`);
+        }
+        return;
+      }
       const results = await Promise.allSettled([
         api.tree(subjectId, session.token),
         api.dailyPlan(subjectId, session.token),
@@ -1221,7 +2374,8 @@ function App() {
       if (treeResult.status === "fulfilled") {
         const nextTree = treeResult.value;
         setTree(nextTree);
-        const current = findNode(nextTree, selectedNodeId) || firstLeaf(nextTree) || nextTree[0];
+        const linkedNode = findNode(nextTree, studyNodeIdFromHash());
+        const current = linkedNode || findNode(nextTree, selectedNodeId);
         setSelectedNodeId(current?.id || null);
       }
       if (planResult.status === "fulfilled") setPlan(planResult.value);
@@ -1256,6 +2410,7 @@ function App() {
     if (!selectedSubjectId || !nodeId) return;
     setDetail(null);
     setContent(null);
+    setNoteDocument(null);
     setChatMessages([]);
     setTab("learn");
     try {
@@ -1265,13 +2420,16 @@ function App() {
         const results = await Promise.allSettled([
           api.content(selectedSubjectId, nodeId, session.token),
           api.notes(selectedSubjectId, nodeId, session.token),
-          api.practice(selectedSubjectId, nodeId, session.token),
+          api.noteDocument(selectedSubjectId, nodeId, session.token),
+          isProfessional ? Promise.resolve([]) : api.practice(selectedSubjectId, nodeId, session.token),
         ]);
+        let nextNoteDocument = results[2].status === "fulfilled" ? results[2].value : null;
         if (results[0].status === "fulfilled") {
           setContent(results[0].value);
         } else if (results[0].reason?.status === 404) {
           try {
             setContent(await api.generateContent(selectedSubjectId, nodeId, session.token));
+            nextNoteDocument = await api.noteDocument(selectedSubjectId, nodeId, session.token);
           } catch (generationError) {
             setError(generationError.message || "Learning content could not be generated");
           }
@@ -1279,15 +2437,59 @@ function App() {
           setError(results[0].reason?.message || "Learning content could not be loaded");
         }
         setNotes(results[1].status === "fulfilled" ? results[1].value : []);
-        setPractice(results[2].status === "fulfilled" ? results[2].value : []);
+        setNoteDocument(nextNoteDocument);
+        setPractice(results[3].status === "fulfilled" ? results[3].value : []);
       }
     } catch (err) { setError(err.message); }
   }
 
-  useEffect(() => { if (session) loadSemesters(); }, [session?.token]);
-  useEffect(() => { if (session && selectedSemesterId) loadSubjects(selectedSemesterId); }, [session?.token, selectedSemesterId]);
-  useEffect(() => { if (session && selectedSubjectId) loadSubject(selectedSubjectId); }, [session?.token, selectedSubjectId]);
-  useEffect(() => { if (session && selectedNodeId) loadNode(selectedNodeId); }, [session?.token, selectedNodeId]);
+  useEffect(() => { if (session) loadSemesters(); }, [session?.token, session?.user?.account_type]);
+  useEffect(() => { if (session && selectedSemesterId) loadSubjects(selectedSemesterId); }, [session?.token, session?.user?.account_type, selectedSemesterId]);
+  useEffect(() => { if (session && selectedSubjectId) loadSubject(selectedSubjectId); }, [session?.token, session?.user?.account_type, selectedSubjectId]);
+  useEffect(() => { if (session && selectedNodeId) loadNode(selectedNodeId); }, [session?.token, session?.user?.account_type, selectedNodeId]);
+  useEffect(() => {
+    if (selectedNodeId) return;
+    setDetail(null);
+    setContent(null);
+    setNotes([]);
+    setNoteDocument(null);
+    setPractice([]);
+    setChatMessages([]);
+  }, [selectedNodeId]);
+  useEffect(() => {
+    const openLinkedNode = () => {
+      const pdfSource = pdfSourceFromHash();
+      if (pdfSource) {
+        const sourceDocument = documents.find((item) => item.id === pdfSource.documentId);
+        if (sourceDocument) {
+          setSelectedDocumentId(sourceDocument.id);
+          setSelectedPdfPage(pdfSource.pageNumber);
+          setView("pdf");
+        }
+        return;
+      }
+      const linkedId = studyNodeIdFromHash();
+      if (!linkedId) {
+        if (window.location.hash === "#study-map") {
+          setSelectedNodeId(null);
+          setView("map");
+        }
+        return;
+      }
+      const linkedNode = findNode(tree, linkedId);
+      if (linkedNode) {
+        setView("map");
+        setSelectedNodeId(linkedId);
+      }
+    };
+    if (pdfSourceFromHash() || studyNodeIdFromHash()) openLinkedNode();
+    window.addEventListener("hashchange", openLinkedNode);
+    window.addEventListener("popstate", openLinkedNode);
+    return () => {
+      window.removeEventListener("hashchange", openLinkedNode);
+      window.removeEventListener("popstate", openLinkedNode);
+    };
+  }, [documents, tree]);
 
   function onAuthenticated(nextSession) {
     localStorage.setItem("study_token", nextSession.token);
@@ -1305,7 +2507,34 @@ function App() {
   function chooseSubject(id) {
     setSelectedSubjectId(id);
     localStorage.setItem("study_subject", id);
+    updateStudyHash(null, { replace: true });
+    setSelectedNodeId(null);
+    setSelectedDocumentId(null);
     setView("map");
+  }
+
+  function openDocument(documentItem) {
+    setSelectedDocumentId(documentItem.id);
+    setSelectedPdfPage(1);
+    setView("pdf");
+  }
+
+  function closeDocument() {
+    if (pdfSourceFromHash()) {
+      const returnNode = findNode(tree, selectedNodeId);
+      updateStudyHash(returnNode || null, { replace: true });
+    }
+    setSelectedDocumentId(null);
+    setSelectedPdfPage(1);
+    setView("map");
+  }
+
+  function navigateToNode(id) {
+    const node = findNode(tree, id);
+    if (!node && detail?.node_type === "subtopic") requestMindMapFullscreen();
+    updateStudyHash(node || null);
+    setView("map");
+    setSelectedNodeId(node?.id || null);
   }
 
   function chooseLectures() {
@@ -1369,6 +2598,32 @@ function App() {
     } catch (err) { setError(err.message); }
   }
 
+  async function refreshWorkspaceIndex() {
+    const semesterId = await loadSemesters();
+    if (semesterId) await loadSubjects(semesterId);
+  }
+
+  async function saveNoteDocument(notesValue) {
+    try {
+      const saved = await api.saveNoteDocument(selectedSubjectId, selectedNodeId, notesValue, session.token);
+      setNoteDocument(saved);
+      notify("Structured notes saved.");
+      return saved;
+    } catch (err) {
+      setError(err.message);
+      throw err;
+    }
+  }
+
+  async function composeNotes(notesValue, instruction) {
+    try {
+      return await api.composeNotes(selectedSubjectId, selectedNodeId, notesValue, instruction, session.token);
+    } catch (err) {
+      setError(err.message);
+      throw err;
+    }
+  }
+
   async function deleteNote(noteId) {
     if (!window.confirm("Delete this personal note?")) return;
     try {
@@ -1413,20 +2668,25 @@ function App() {
   }
 
   async function deleteSubject(subject) {
-    if (!window.confirm(`Delete ${subject.name}? This removes its PDFs, study map, assignments, lectures, notes, and progress.`)) return;
+    if (!window.confirm(
+      isProfessional
+        ? `Delete ${subject.name}? This removes its PDFs, global map, learning pages, and notes.`
+        : `Delete ${subject.name}? This removes its PDFs, study map, assignments, lectures, notes, and progress.`,
+    )) return;
     try {
       await api.deleteSubject(subject.id, session.token);
       setSelectedNodeId(null);
       setDetail(null);
       setContent(null);
       setSelectedLectureId(null);
+      setSelectedDocumentId(null);
       setView("map");
       if (selectedSubjectId === subject.id) {
         localStorage.removeItem("study_subject");
         setSelectedSubjectId(null);
       }
       await loadSubjects(selectedSemesterId);
-      notify("Subject deleted.");
+      notify(isProfessional ? "Folder deleted." : "Subject deleted.");
     } catch (err) { setError(err.message); }
   }
 
@@ -1461,10 +2721,110 @@ function App() {
   }
 
   if (!session) return <AuthScreen onAuthenticated={onAuthenticated} />;
-  if (semesters.length === 0 || subjects.length === 0) return <><header className="onboarding-bar"><div className="brand-mark"><span>◒</span> study / os</div><button className="icon-button" onClick={logout}><Icon name="logout" size={16} /></button></header><EmptyWorkspace token={session.token} semesters={semesters} onCreated={loadSemesters} /></>;
+  if (semesters.length === 0 || subjects.length === 0) {
+    return (
+      <>
+        <header className="onboarding-bar">
+          <div className="brand-mark"><span>◒</span> study / os</div>
+          <button className="icon-button" onClick={logout}><Icon name="logout" size={16} /></button>
+        </header>
+        <EmptyWorkspace token={session.token} semesters={semesters} onCreated={refreshWorkspaceIndex} professionalMode={isProfessional} />
+      </>
+    );
+  }
+  if (view === "pdf" && selectedDocument) {
+    return <PdfViewer subjectId={selectedSubjectId} documentItem={selectedDocument} token={session.token} initialPage={selectedPdfPage} onClose={closeDocument} />;
+  }
 
   const selectedComplete = progressMap[selectedNodeId]?.status === "completed";
-  return <div className="app-shell"><Sidebar user={session.user} semesters={semesters} selectedSemester={selectedSemester} subjects={subjects} selectedSubjectId={selectedSubjectId} documents={documents} lectures={lectures} lectureView={view === "lectures"} selectedLectureId={selectedLectureId} onSemester={chooseSemester} onSubject={chooseSubject} onAddSemester={() => setWorkspaceModal("semester")} onAddSubject={() => setWorkspaceModal("subject")} onDeleteSubject={deleteSubject} onDeleteDocument={deleteDocument} tree={tree} selectedNodeId={selectedNodeId} onNode={(id) => { setView("map"); setSelectedNodeId(id); }} progressMap={progressMap} onUpload={() => setUploadOpen(true)} onLectures={chooseLectures} onLecture={chooseLecture} onStartLecture={createLecture} onLogout={logout} /><main className="main-area"><header className="topbar"><div className="mobile-brand"><div className="brand-mark"><span>◒</span> study / os</div></div><div className="topbar-context"><span className="mini-label">Currently studying</span><strong>{selectedSubject?.name}</strong><span className="context-dot" />{view === "lectures" ? <span className="context-status">{lectures.length} lecture{lectures.length === 1 ? "" : "s"} captured</span> : documents.length ? <span className="context-status">{documents.length} study PDF{documents.length > 1 ? "s" : ""} indexed</span> : <span className="context-status">Ready for your first upload</span>}</div><div className="topbar-actions"><label className="model-switch"><span>AI</span><select value={llmProvider} onChange={changeLlmProvider} aria-label="Choose AI provider"><option value="openai">OpenAI</option><option value="deepseek">DeepSeek Flash</option></select></label><button className="search-button"><Icon name="search" size={17} /><span>Search map</span><kbd>⌘ K</kbd></button><button className="top-upload" onClick={() => setUploadOpen(true)}><Icon name="upload" size={16} /><span>Upload</span></button><div className="avatar top-avatar">{initials(session.user?.full_name || session.user?.email)}</div></div></header><div className="content-grid"><section className="canvas">{view === "lectures" ? <LectureWorkspace subjectId={selectedSubjectId} token={session.token} lectures={lectures} selectedLectureId={selectedLectureId} onCreate={createLecture} onSelect={chooseLecture} onRefresh={updateLecture} onDelete={deleteLecture} onNotify={lectureNotify} /> : <><div className="canvas-header"><div><Breadcrumb detail={detail} /><h1>{detail?.title || selectedSubject?.name || "Your study map"}</h1></div>{detail?.node_type === "subtopic" && <button className={`complete-button ${selectedComplete ? "done" : ""}`} onClick={() => updateProgress(!selectedComplete)}>{selectedComplete ? <><Icon name="check" size={16} />Completed</> : <>Mark complete <Icon name="arrow" size={15} /></>}</button>}</div>{loading && !detail ? <div className="loading-state"><span className="spinner" />Loading your map...</div> : detail?.node_type === "subtopic" ? <LearningPage detail={detail} content={content} tab={tab} setTab={setTab} notes={notes} noteText={noteText} setNoteText={setNoteText} onSaveNote={saveNote} onUpdateNote={updateNote} onDeleteNote={deleteNote} practice={practice} onSubmitPractice={submitPractice} chatMessages={chatMessages} chatText={chatText} setChatText={setChatText} onChat={sendChat} chatBusy={chatBusy} /> : <Overview detail={detail} tree={tree} onNode={setSelectedNodeId} />}</>}</section><TodayPanel subjectId={selectedSubjectId} plan={plan} progressRows={progressRows} tree={tree} onNode={setSelectedNodeId} onRevision={completeRevision} onTest={setActiveTest} /></div></main>{workspaceModal && <WorkspaceModal kind={workspaceModal} semesters={semesters} selectedSemesterId={selectedSemesterId} token={session.token} onClose={() => setWorkspaceModal(null)} onCreated={handleWorkspaceCreated} />}{uploadOpen && <UploadModal subject={selectedSubject} token={session.token} onClose={() => setUploadOpen(false)} onDone={handleUploadDone} />}{activeTest && <TestModal test={activeTest} subjectId={selectedSubjectId} token={session.token} onClose={() => setActiveTest(null)} onSubmitted={() => { refreshSubject(); notify("Your analytics are saved."); }} />}{toast && <div className="toast"><Icon name="check" size={16} />{toast}</div>}{error && <button className="error-toast" onClick={() => setError("")}>{error}<Icon name="close" size={15} /></button>}</div>;
+  return (
+    <div className={`app-shell ${isProfessional ? "professional-app" : ""}`}>
+      <Sidebar
+        user={session.user}
+        professionalMode={isProfessional}
+        semesters={semesters}
+        selectedSemester={selectedSemester}
+        subjects={subjects}
+        selectedSubjectId={selectedSubjectId}
+        documents={documents}
+        lectures={lectures}
+        lectureView={view === "lectures"}
+        selectedLectureId={selectedLectureId}
+        onSemester={chooseSemester}
+        onSubject={chooseSubject}
+        onAddSemester={() => setWorkspaceModal("semester")}
+        onAddSubject={() => setWorkspaceModal(isProfessional ? "folder" : "subject")}
+        onDeleteSubject={deleteSubject}
+        onDocument={openDocument}
+        onDeleteDocument={deleteDocument}
+        tree={tree}
+        selectedNodeId={selectedNodeId}
+        onNode={navigateToNode}
+        progressMap={progressMap}
+        onUpload={() => setUploadOpen(true)}
+        onLectures={chooseLectures}
+        onLecture={chooseLecture}
+        onStartLecture={createLecture}
+        onLogout={logout}
+      />
+      <main className="main-area">
+        <header className="topbar">
+          <div className="mobile-brand"><div className="brand-mark"><span>◒</span> study / os</div></div>
+          <div className="topbar-context">
+            <span className="mini-label">{isProfessional ? "Current folder" : "Currently studying"}</span>
+            <strong>{selectedSubject?.name}</strong>
+            <span className="context-dot" />
+            {!isProfessional && view === "lectures"
+              ? <span className="context-status">{lectures.length} lecture{lectures.length === 1 ? "" : "s"} captured</span>
+              : documents.length
+                ? <span className="context-status">{documents.length} PDF{documents.length > 1 ? "s" : ""} indexed</span>
+                : <span className="context-status">Ready for your first PDF</span>}
+          </div>
+          <div className="topbar-actions">
+            <button className="os-window-control" onClick={() => setDarkMode((enabled) => !enabled)} title={darkMode ? "Switch to light mode" : "Switch to dark mode"}><Icon name={darkMode ? "sun" : "moon"} size={16} /><span>{darkMode ? "Light" : "Dark"}</span></button>
+            <button className={`os-window-control ${appFullscreen ? "active" : ""}`} onClick={toggleAppFullscreen} title={appFullscreen ? "Exit browser fullscreen" : "Enter browser fullscreen"}><Icon name="fullscreen" size={15} /><span>{appFullscreen ? "Exit" : "Fullscreen"}</span></button>
+            <label className="model-switch"><span>AI</span><select value={llmProvider} onChange={changeLlmProvider} aria-label="Choose AI provider"><option value="openai">OpenAI</option><option value="deepseek">DeepSeek Flash</option></select></label>
+            <button className="search-button"><Icon name="search" size={17} /><span>Search map</span><kbd>⌘ K</kbd></button>
+            <button className="top-upload" onClick={() => setUploadOpen(true)}><Icon name="upload" size={16} /><span>Upload PDF</span></button>
+            <div className="avatar top-avatar">{initials(session.user?.full_name || session.user?.email)}</div>
+          </div>
+        </header>
+        <div className={`content-grid ${isProfessional ? "professional-grid" : ""}`}>
+          <section className="canvas">
+            {!isProfessional && view === "lectures" ? (
+              <LectureWorkspace subjectId={selectedSubjectId} token={session.token} lectures={lectures} selectedLectureId={selectedLectureId} onCreate={createLecture} onSelect={chooseLecture} onRefresh={updateLecture} onDelete={deleteLecture} onNotify={lectureNotify} />
+            ) : (
+              <>
+                <div className="canvas-header">
+                  <div>
+                    <Breadcrumb detail={detail} onNode={navigateToNode} professionalMode={isProfessional} />
+                    <h1>{detail?.title || selectedSubject?.name || (isProfessional ? "Your global map" : "Your study map")}</h1>
+                  </div>
+                  <div className="canvas-header-actions">
+                    {detail?.node_type === "subtopic" && <a className="global-map-link" href="#study-map" onClick={(event) => { event.preventDefault(); navigateToNode(null); }}><Icon name="layers" size={15} />Global map</a>}
+                    {!isProfessional && detail?.node_type === "subtopic" && <button className={`complete-button ${selectedComplete ? "done" : ""}`} onClick={() => updateProgress(!selectedComplete)}>{selectedComplete ? <><Icon name="check" size={16} />Completed</> : <>Mark complete <Icon name="arrow" size={15} /></>}</button>}
+                  </div>
+                </div>
+                {loading && !detail ? (
+                  <div className="loading-state"><span className="spinner" />Loading your map...</div>
+                ) : detail?.node_type === "subtopic" ? (
+                  <LearningPage detail={detail} content={content} tab={tab} setTab={setTab} notes={notes} noteDocument={noteDocument} noteText={noteText} setNoteText={setNoteText} onSaveNote={saveNote} onUpdateNote={updateNote} onDeleteNote={deleteNote} onSaveNoteDocument={saveNoteDocument} onComposeNotes={composeNotes} practice={practice} onSubmitPractice={submitPractice} chatMessages={chatMessages} chatText={chatText} setChatText={setChatText} onChat={sendChat} chatBusy={chatBusy} professionalMode={isProfessional} />
+                ) : (
+                  <Overview detail={detail} tree={tree} onNode={navigateToNode} rootTitle={selectedSubject?.name} selectedId={selectedNodeId} progressMap={progressMap} professionalMode={isProfessional} />
+                )}
+              </>
+            )}
+          </section>
+          {!isProfessional && <TodayPanel subjectId={selectedSubjectId} plan={plan} progressRows={progressRows} tree={tree} onNode={navigateToNode} onRevision={completeRevision} onTest={setActiveTest} onSubmitPractice={submitPractice} />}
+        </div>
+      </main>
+      {workspaceModal && <WorkspaceModal kind={workspaceModal} semesters={semesters} selectedSemesterId={selectedSemesterId} token={session.token} onClose={() => setWorkspaceModal(null)} onCreated={handleWorkspaceCreated} />}
+      {uploadOpen && <UploadModal subject={selectedSubject} token={session.token} onClose={() => setUploadOpen(false)} onDone={handleUploadDone} professionalMode={isProfessional} />}
+      {!isProfessional && activeTest && <TestModal test={activeTest} subjectId={selectedSubjectId} token={session.token} onClose={() => setActiveTest(null)} onSubmitted={() => { refreshSubject(); notify("Your analytics are saved."); }} />}
+      {toast && <div className="toast"><Icon name="check" size={16} />{toast}</div>}
+      {error && <button className="error-toast" onClick={() => setError("")}>{error}<Icon name="close" size={15} /></button>}
+    </div>
+  );
 }
 
 createRoot(document.getElementById("root")).render(<App />);

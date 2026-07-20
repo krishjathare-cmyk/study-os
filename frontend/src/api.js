@@ -27,6 +27,22 @@ async function request(path, options = {}, token) {
   return payload;
 }
 
+async function requestBlob(path, token) {
+  const headers = new Headers();
+  if (token) headers.set("Authorization", `Bearer ${token}`);
+
+  const response = await fetch(`${API_URL}${path}`, { headers });
+  if (!response.ok) {
+    const contentType = response.headers.get("content-type") || "";
+    const payload = contentType.includes("application/json")
+      ? await response.json()
+      : await response.text();
+    const detail = typeof payload === "object" ? payload.detail : payload;
+    throw new ApiError(detail || "The PDF could not be opened", response.status);
+  }
+  return response.blob();
+}
+
 const json = (method, path, body, token) => request(path, {
   method,
   body: body === undefined ? undefined : JSON.stringify(body),
@@ -35,6 +51,7 @@ const json = (method, path, body, token) => request(path, {
 export const api = {
   login: (body) => json("POST", "/login", body),
   register: (body) => json("POST", "/register", body),
+  me: (token) => request("/me", {}, token),
   semesters: (token) => request("/semesters", {}, token),
   createSemester: (body, token) => json("POST", "/semesters", body, token),
   subjects: (semesterId, token) => request(`/semesters/${semesterId}/subjects`, {}, token),
@@ -42,11 +59,15 @@ export const api = {
   deleteSubject: (subjectId, token) => request(`/subjects/${subjectId}`, { method: "DELETE" }, token),
   tree: (subjectId, token) => request(`/subjects/${subjectId}/study-tree`, {}, token),
   documents: (subjectId, token) => request(`/subjects/${subjectId}/documents`, {}, token),
+  documentPdf: (subjectId, documentId, token) => requestBlob(`/subjects/${subjectId}/documents/${documentId}/file`, token),
   deleteDocument: (subjectId, documentId, token) => request(`/subjects/${subjectId}/documents/${documentId}`, { method: "DELETE" }, token),
   node: (subjectId, nodeId, token) => request(`/subjects/${subjectId}/study-nodes/${nodeId}`, {}, token),
   content: (subjectId, nodeId, token) => request(`/subjects/${subjectId}/study-nodes/${nodeId}/content`, {}, token),
   generateContent: (subjectId, nodeId, token) => request(`/subjects/${subjectId}/study-nodes/${nodeId}/content/generate`, { method: "POST" }, token),
   notes: (subjectId, nodeId, token) => request(`/subjects/${subjectId}/study-nodes/${nodeId}/notes`, {}, token),
+  noteDocument: (subjectId, nodeId, token) => request(`/subjects/${subjectId}/study-nodes/${nodeId}/note-document`, {}, token),
+  saveNoteDocument: (subjectId, nodeId, notes, token) => json("PUT", `/subjects/${subjectId}/study-nodes/${nodeId}/note-document`, { notes }, token),
+  composeNotes: (subjectId, nodeId, notes, instruction, token) => json("POST", `/subjects/${subjectId}/study-nodes/${nodeId}/note-document/compose`, { notes, instruction }, token),
   createNote: (subjectId, nodeId, body, token) => json("POST", `/subjects/${subjectId}/study-nodes/${nodeId}/notes`, body, token),
   updateNote: (subjectId, nodeId, noteId, body, token) => json("PUT", `/subjects/${subjectId}/study-nodes/${nodeId}/notes/${noteId}`, body, token),
   deleteNote: (subjectId, nodeId, noteId, token) => request(`/subjects/${subjectId}/study-nodes/${nodeId}/notes/${noteId}`, { method: "DELETE" }, token),
