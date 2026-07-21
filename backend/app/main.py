@@ -1085,6 +1085,16 @@ def upload_document(
                 len(organization.subtopic_ids),
             )
         db.commit()
+    except HTTPException as error:
+        _remove_failed_document_upload(
+            db=db,
+            user_id=current_user.id,
+            subject_id=subject_id,
+            document_id=document.id,
+            file_path=file_path,
+            initial_node_ids=initial_node_ids,
+        )
+        raise error
     except Exception as error:
         _remove_failed_document_upload(
             db=db,
@@ -1836,6 +1846,15 @@ def upload_assignment(
                 for chunk in chunks
             ],
         )
+    except HTTPException as error:
+        _remove_failed_assignment_upload(
+            db=db,
+            user_id=current_user.id,
+            subject_id=subject_id,
+            assignment_id=assignment.id,
+            file_path=file_path,
+        )
+        raise error
     except Exception as error:
         _remove_failed_assignment_upload(
             db=db,
