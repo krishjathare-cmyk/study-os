@@ -941,6 +941,88 @@ function Sidebar({ user, professionalMode = false, semesters, selectedSemester, 
   );
 }
 
+function SearchMapModal({ tree, selectedId, progressMap = {}, onClose, onNode, professionalMode = false }) {
+  const [query, setQuery] = useState("");
+  const inputRef = useRef(null);
+  const nodes = useMemo(() => flattenNodes(tree), [tree]);
+  const normalizedQuery = query.trim().toLowerCase();
+  const results = useMemo(() => {
+    const terms = normalizedQuery.split(/\s+/).filter(Boolean);
+    const scored = nodes.map((node) => {
+      const title = (node.title || "").toLowerCase();
+      const heading = (node.heading_number || "").toLowerCase();
+      const type = (node.node_type || "").toLowerCase();
+      const haystack = `${heading} ${title} ${type}`;
+      if (!terms.length) return { node, score: node.id === selectedId ? 4 : node.node_type === "subtopic" ? 2 : 1 };
+      if (!terms.every((term) => haystack.includes(term))) return null;
+      let score = 1;
+      if (title === normalizedQuery) score += 10;
+      if (title.startsWith(normalizedQuery)) score += 6;
+      if (heading === normalizedQuery) score += 5;
+      if (node.node_type === "subtopic") score += 2;
+      if (node.id === selectedId) score += 3;
+      return { node, score };
+    }).filter(Boolean);
+    return scored.sort((a, b) => b.score - a.score || a.node.level - b.node.level).slice(0, 12).map((item) => item.node);
+  }, [nodes, normalizedQuery, selectedId]);
+
+  useEffect(() => {
+    inputRef.current?.focus();
+  }, []);
+
+  function openNode(node) {
+    updateStudyHash(node);
+    onNode(node.id);
+    onClose();
+  }
+
+  function handleKeyDown(event) {
+    if (event.key === "Escape") {
+      event.preventDefault();
+      onClose();
+      return;
+    }
+    if (event.key === "Enter" && results[0]) {
+      event.preventDefault();
+      openNode(results[0]);
+    }
+  }
+
+  return (
+    <div className="search-modal-backdrop" onMouseDown={(event) => event.target === event.currentTarget && onClose()}>
+      <section className="search-modal" role="dialog" aria-modal="true" aria-label={professionalMode ? "Search global map" : "Search study map"}>
+        <div className="search-modal-input">
+          <Icon name="search" size={18} />
+          <input
+            ref={inputRef}
+            value={query}
+            onChange={(event) => setQuery(event.target.value)}
+            onKeyDown={handleKeyDown}
+            placeholder={professionalMode ? "Search global map..." : "Search study map..."}
+          />
+          <button onClick={onClose} title="Close search"><Icon name="close" size={16} /></button>
+        </div>
+        <div className="search-results">
+          {results.map((node) => {
+            const completed = progressMap[node.id]?.status === "completed";
+            return (
+              <button key={node.id} className={`search-result ${selectedId === node.id ? "selected" : ""}`} onClick={() => openNode(node)}>
+                <span className={`search-result-type ${node.node_type}`}>{node.heading_number || (node.node_type === "chapter" ? "C" : node.node_type === "topic" ? "T" : "S")}</span>
+                <span className="search-result-copy">
+                  <strong>{node.title}</strong>
+                  <small>{node.node_type.replace("_", " ")}{node.children?.length ? ` / ${node.children.length} inside` : ""}</small>
+                </span>
+                {completed && <Icon name="check" size={14} />}
+              </button>
+            );
+          })}
+          {!results.length && <div className="search-empty"><Icon name="search" size={20} /><span>No matching map nodes.</span></div>}
+        </div>
+      </section>
+    </div>
+  );
+}
+
 function RevisionItem({ revision, subjectId, onNode, onRevision, onSubmitPractice }) {
   const [open, setOpen] = useState(false);
   const [answers, setAnswers] = useState({});
@@ -2426,6 +2508,7 @@ function App() {
   const [loading, setLoading] = useState(false);
   const [toast, setToast] = useState("");
   const [uploadOpen, setUploadOpen] = useState(false);
+  const [searchOpen, setSearchOpen] = useState(false);
   const [workspaceModal, setWorkspaceModal] = useState(null);
   const [activeTest, setActiveTest] = useState(null);
   const [llmProvider, setLlmProvider] = useState(() => localStorage.getItem("study_llm_provider") || "openai");
@@ -2466,6 +2549,18 @@ function App() {
       .catch(() => {});
     return () => { cancelled = true; };
   }, [session?.token]);
+
+  useEffect(() => {
+    if (!session?.token) return;
+    function openSearchShortcut(event) {
+      if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "k") {
+        event.preventDefault();
+        if (tree.length) setSearchOpen(true);
+      }
+    }
+    window.addEventListener("keydown", openSearchShortcut);
+    return () => window.removeEventListener("keydown", openSearchShortcut);
+  }, [session?.token, tree.length]);
 
   function notify(message) {
     setToast(message);
@@ -2997,7 +3092,7 @@ function App() {
             <button className="os-window-control" onClick={() => setDarkMode((enabled) => !enabled)} title={darkMode ? "Switch to light mode" : "Switch to dark mode"}><Icon name={darkMode ? "sun" : "moon"} size={16} /><span>{darkMode ? "Light" : "Dark"}</span></button>
             <button className={`os-window-control ${appFullscreen ? "active" : ""}`} onClick={toggleAppFullscreen} title={appFullscreen ? "Exit browser fullscreen" : "Enter browser fullscreen"}><Icon name="fullscreen" size={15} /><span>{appFullscreen ? "Exit" : "Fullscreen"}</span></button>
             <label className="model-switch"><span>AI</span><select value={llmProvider} onChange={changeLlmProvider} aria-label="Choose AI provider"><option value="openai">OpenAI</option><option value="deepseek">DeepSeek Flash</option></select></label>
-            <button className="search-button"><Icon name="search" size={17} /><span>Search map</span><kbd>⌘ K</kbd></button>
+            <button className="search-button" disabled={!tree.length} onClick={() => setSearchOpen(true)}><Icon name="search" size={17} /><span>Search map</span><kbd>⌘ K</kbd></button>
             <button className="top-upload" onClick={() => setUploadOpen(true)}><Icon name="upload" size={16} /><span>Upload PDF</span></button>
             <div className="avatar top-avatar">{initials(session.user?.full_name || session.user?.email)}</div>
           </div>
@@ -3032,6 +3127,7 @@ function App() {
         </div>
       </main>
       {workspaceModal && <WorkspaceModal kind={workspaceModal} semesters={semesters} selectedSemesterId={selectedSemesterId} token={session.token} onClose={() => setWorkspaceModal(null)} onCreated={handleWorkspaceCreated} />}
+      {searchOpen && <SearchMapModal tree={tree} selectedId={selectedNodeId} progressMap={progressMap} onClose={() => setSearchOpen(false)} onNode={navigateToNode} professionalMode={isProfessional} />}
       {uploadOpen && <UploadModal subject={selectedSubject} token={session.token} onClose={() => setUploadOpen(false)} onDone={handleUploadDone} professionalMode={isProfessional} />}
       {!isProfessional && activeTest && <TestModal test={activeTest} subjectId={selectedSubjectId} token={session.token} onClose={() => setActiveTest(null)} onSubmitted={() => { refreshSubject(); notify("Your analytics are saved."); }} />}
       {toast && <div className="toast"><Icon name="check" size={16} />{toast}</div>}

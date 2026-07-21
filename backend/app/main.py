@@ -90,6 +90,18 @@ from app.study_workflow import (
     set_node_completion,
     utc_now,
 )
+from app.usage_limits import (
+    AI_MESSAGE,
+    CONTENT_GENERATION,
+    NOTE_GENERATION,
+    PDF_UPLOAD,
+    PRACTICE_GENERATION,
+    TRANSCRIPT_SECOND,
+    record_usage,
+    require_daily_capacity,
+    require_pdf_capacity,
+    usage_summary,
+)
 
 Base.metadata.create_all(bind=engine)
 logger = logging.getLogger(__name__)
@@ -764,6 +776,14 @@ def get_current_account(
     return current_user
 
 
+@app.get("/me/usage", response_model=schemas.UsageSummaryResponse)
+def get_current_usage(
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(get_current_user),
+):
+    return usage_summary(db, current_user)
+
+
 @app.post("/semesters", response_model=schemas.SemesterResponse)
 def create_semester(
     semester: schemas.SemesterCreate,
@@ -959,6 +979,7 @@ def upload_document(
     current_user: models.User = Depends(get_current_user)
 ):
     get_owned_subject(db, subject_id, current_user.id)
+    require_pdf_capacity(db, current_user)
 
     display_filename = sanitize_display_filename(file.filename, ".pdf")
     user_upload_dir = os.path.join(
@@ -1016,6 +1037,20 @@ def upload_document(
             raise ValueError("The document did not produce a complete chunk set")
         db.commit()
 
+        require_daily_capacity(
+            db,
+            current_user,
+            CONTENT_GENERATION,
+            len(organization.subtopic_ids),
+        )
+        if current_user.account_type == "student":
+            require_daily_capacity(
+                db,
+                current_user,
+                PRACTICE_GENERATION,
+                len(organization.subtopic_ids),
+            )
+
         regenerate_learning_for_nodes(db, organization.subtopic_ids)
         if current_user.account_type == "student":
             regenerate_study_practice_for_nodes(db, organization.subtopic_ids)
@@ -1035,6 +1070,21 @@ def upload_document(
             chunks=organization.chunk_texts,
             subtopic_ids=organization.subtopic_ids,
         )
+        record_usage(db, current_user, PDF_UPLOAD)
+        record_usage(
+            db,
+            current_user,
+            CONTENT_GENERATION,
+            len(organization.subtopic_ids),
+        )
+        if current_user.account_type == "student":
+            record_usage(
+                db,
+                current_user,
+                PRACTICE_GENERATION,
+                len(organization.subtopic_ids),
+            )
+        db.commit()
     except Exception as error:
         _remove_failed_document_upload(
             db=db,
@@ -1252,6 +1302,7 @@ def transcribe_lecture_chunk(
     lecture = get_owned_lecture(db, subject_id, lecture_id, current_user.id)
     if lecture.status == "ready":
         raise HTTPException(status_code=409, detail="Lecture has already been finalized")
+    require_daily_capacity(db, current_user, TRANSCRIPT_SECOND, 20)
 
     audio_filename = sanitize_audio_filename(
         file.filename,
@@ -1283,6 +1334,7 @@ def transcribe_lecture_chunk(
     lecture.transcript_segments = segments
     lecture.transcript = "\n".join(item["text"] for item in segments if item.get("text"))
     lecture.status = "recording"
+    record_usage(db, current_user, TRANSCRIPT_SECOND, 20)
     db.commit()
     db.refresh(lecture)
     return {
@@ -1310,11 +1362,13 @@ def finalize_lecture(
         raise HTTPException(status_code=400, detail="No transcript has been captured yet")
     if lecture.status == "ready" and lecture.notes:
         return lecture
+    require_daily_capacity(db, current_user, NOTE_GENERATION)
 
     notes = generate_lecture_notes(lecture.title, lecture.transcript)
     lecture.notes = notes or _lecture_fallback_notes(lecture.title, lecture.transcript)
     lecture.status = "ready"
     lecture.ended_at = utc_now()
+    record_usage(db, current_user, NOTE_GENERATION)
     db.commit()
     db.refresh(lecture)
     return lecture
@@ -1538,6 +1592,7 @@ def retrieve_subject_chunks(
 
     if subject is None:
         raise HTTPException(status_code=404, detail="Subject not found")
+    require_daily_capacity(db, current_user, AI_MESSAGE)
 
     try:
         retrieved_chunks = retrieve_chunks(
@@ -1613,6 +1668,8 @@ def chat_with_subject_documents(
         for chunk in retrieved_chunks
     ]
 
+    record_usage(db, current_user, AI_MESSAGE)
+    db.commit()
     return {
         "answer": answer,
         "sources": sources
@@ -1697,6 +1754,7 @@ def upload_assignment(
 ):
     require_student_account(current_user)
     get_owned_subject(db, subject_id, current_user.id)
+    require_pdf_capacity(db, current_user)
     display_filename = sanitize_display_filename(file.filename, ".pdf")
     assignment_dir = os.path.join(
         UPLOAD_DIR,
@@ -1737,6 +1795,12 @@ def upload_assignment(
         chunks, affected_node_ids = create_and_map_assignment_chunks(db, assignment)
         if not chunks:
             raise ValueError("The assignment did not produce any chunks")
+        require_daily_capacity(
+            db,
+            current_user,
+            PRACTICE_GENERATION,
+            max(1, len(affected_node_ids)),
+        )
         generate_practice_for_assignment(db, assignment, affected_node_ids)
         pregenerate_topic_tests_for_nodes(
             db,
@@ -1783,6 +1847,14 @@ def upload_assignment(
         raise HTTPException(status_code=422, detail=UPLOAD_RETRY_MESSAGE) from error
 
     mapped_count = sum(chunk.mapping_status == "mapped" for chunk in chunks)
+    record_usage(db, current_user, PDF_UPLOAD)
+    record_usage(
+        db,
+        current_user,
+        PRACTICE_GENERATION,
+        max(1, len(affected_node_ids)),
+    )
+    db.commit()
     return {
         "id": assignment.id,
         "subject_id": subject_id,
@@ -1899,7 +1971,9 @@ def get_node_learning_content(
     content = node.learning_content
     if not content.real_life_example or not content.structured_sections:
         # Upgrade older content once so the structured notes are populated.
+        require_daily_capacity(db, current_user, CONTENT_GENERATION)
         content = regenerate_learning_content(db, node)
+        record_usage(db, current_user, CONTENT_GENERATION)
         db.commit()
         db.refresh(content)
     visualization = ensure_node_visualization(db, node)
@@ -1933,7 +2007,9 @@ def generate_node_content(
     node = get_owned_node(db, subject_id, node_id, current_user.id)
     if node.node_type != "subtopic":
         raise HTTPException(status_code=400, detail="Content is generated for subtopics")
+    require_daily_capacity(db, current_user, CONTENT_GENERATION)
     content = regenerate_learning_content(db, node)
+    record_usage(db, current_user, CONTENT_GENERATION)
     db.commit()
     db.refresh(content)
     visualization = ensure_node_visualization(db, node)
@@ -2132,6 +2208,7 @@ def compose_node_note_document(
             status_code=400,
             detail="Structured notes are available for subtopics",
         )
+    require_daily_capacity(db, current_user, NOTE_GENERATION)
     try:
         result = edit_structured_notes(
             node_path(node),
@@ -2147,6 +2224,8 @@ def compose_node_note_document(
             status_code=502,
             detail="The AI notes editor returned an invalid note structure.",
         ) from error
+    record_usage(db, current_user, NOTE_GENERATION)
+    db.commit()
     return {
         "notes": validated_notes.model_dump(),
         "message": str(result.get("message") or "Notes updated."),
@@ -2214,6 +2293,7 @@ def chat_with_study_node(
     node = get_owned_node(db, subject_id, node_id, current_user.id)
     if node.node_type != "subtopic":
         raise HTTPException(status_code=400, detail="Open a subtopic to use scoped chat")
+    require_daily_capacity(db, current_user, AI_MESSAGE)
 
     rows = node_chunk_rows(db, node)
     ranked_rows = sorted(
@@ -2234,6 +2314,8 @@ def chat_with_study_node(
     except LLMProviderError as error:
         raise HTTPException(status_code=502, detail=str(error)) from error
 
+    record_usage(db, current_user, AI_MESSAGE)
+    db.commit()
     return {
         "node_id": node.id,
         "answer": answer,

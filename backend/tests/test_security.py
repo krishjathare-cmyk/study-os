@@ -19,6 +19,14 @@ from app.security import (
     sanitize_display_filename,
     save_bounded_pdf_upload,
 )
+from app.usage_limits import (
+    AI_MESSAGE,
+    PDF_UPLOAD,
+    record_usage,
+    require_daily_capacity,
+    require_pdf_capacity,
+    usage_summary,
+)
 
 
 class SecurityTests(unittest.TestCase):
@@ -147,6 +155,86 @@ class SecurityTests(unittest.TestCase):
                 )
             self.assertEqual(413, raised.exception.status_code)
             self.assertFalse(Path(oversized_path).exists())
+
+    def test_usage_summary_counts_daily_events_and_remaining_quota(self):
+        user = models.User(
+            full_name="Quota Reader",
+            email="quota@example.com",
+            hashed_password="hash",
+            account_type="student",
+            email_verified=True,
+        )
+        self.db.add(user)
+        self.db.commit()
+        self.db.refresh(user)
+
+        record_usage(self.db, user, AI_MESSAGE, 2)
+        record_usage(self.db, user, PDF_UPLOAD)
+        self.db.commit()
+
+        summary = usage_summary(self.db, user)
+
+        self.assertEqual("student", summary["plan"])
+        self.assertEqual(2, summary["used"]["ai_messages_daily"])
+        self.assertEqual(28, summary["remaining"]["ai_messages_daily"])
+        self.assertEqual(3, summary["limits"]["pdfs_total"])
+
+    def test_daily_usage_limit_blocks_expensive_actions(self):
+        user = models.User(
+            full_name="Limit Reader",
+            email="limit@example.com",
+            hashed_password="hash",
+            account_type="student",
+            email_verified=True,
+        )
+        self.db.add(user)
+        self.db.commit()
+        self.db.refresh(user)
+
+        record_usage(self.db, user, AI_MESSAGE, 30)
+        self.db.commit()
+
+        with self.assertRaises(HTTPException) as raised:
+            require_daily_capacity(self.db, user, AI_MESSAGE)
+        self.assertEqual(429, raised.exception.status_code)
+
+    def test_pdf_limit_uses_existing_documents_and_assignments(self):
+        user = models.User(
+            full_name="PDF Reader",
+            email="pdf-limit@example.com",
+            hashed_password="hash",
+            account_type="student",
+            email_verified=True,
+        )
+        semester = models.Semester(name="S1", user=user)
+        subject = models.Subject(name="Subject", semester=semester)
+        self.db.add_all([user, semester, subject])
+        self.db.flush()
+        self.db.add_all([
+            models.Document(
+                filename="one.pdf",
+                file_path="/tmp/one.pdf",
+                document_type="textbook",
+                subject=subject,
+            ),
+            models.Document(
+                filename="two.pdf",
+                file_path="/tmp/two.pdf",
+                document_type="textbook",
+                subject=subject,
+            ),
+            models.AssignmentDocument(
+                filename="three.pdf",
+                file_path="/tmp/three.pdf",
+                subject=subject,
+            ),
+        ])
+        self.db.commit()
+        self.db.refresh(user)
+
+        with self.assertRaises(HTTPException) as raised:
+            require_pdf_capacity(self.db, user)
+        self.assertEqual(429, raised.exception.status_code)
 
 
 if __name__ == "__main__":

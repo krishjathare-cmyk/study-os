@@ -48,6 +48,16 @@ class LoginAttempt(Base):
     )
 
 
+class UsageEvent(Base):
+    __tablename__ = "usage_events"
+
+    id = Column(Integer, primary_key=True, index=True)
+    user_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True)
+    event_type = Column(String, nullable=False, index=True)
+    amount = Column(Integer, nullable=False, default=1)
+    created_at = Column(DateTime(timezone=True), server_default=func.now(), index=True)
+
+
 class Semester(Base):
     __tablename__ = "semesters"
 

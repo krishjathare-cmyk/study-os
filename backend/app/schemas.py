@@ -150,6 +150,23 @@ class TokenResponse(BaseModel):
     token_type: str
     user: UserResponse
 
+
+class UsageQuota(BaseModel):
+    pdfs_total: int
+    ai_messages_daily: int
+    note_generations_daily: int
+    content_generations_daily: int
+    practice_generations_daily: int
+    transcript_seconds_daily: int
+
+
+class UsageSummaryResponse(BaseModel):
+    plan: str
+    used: UsageQuota
+    limits: UsageQuota
+    remaining: UsageQuota
+
+
 class SemesterCreate(RequestModel):
     name: str = Field(min_length=1, max_length=120)
     description: str | None = Field(default=None, max_length=2000)
