@@ -140,7 +140,9 @@ function findNode(nodes, id) {
   return flattenNodes(nodes).find((node) => node.id === id);
 }
 
-const MINDMAP_POSITIONS_KEY = "study_mindmap_node_positions_v2";
+// Bump the layout version whenever the automatic geometry changes so stale
+// hand-arranged coordinates cannot pull a new map back into an old shape.
+const MINDMAP_POSITIONS_KEY = "study_mindmap_node_positions_v3";
 const MINDMAP_FULLSCREEN_REQUEST_KEY = "study_mindmap_open_fullscreen";
 
 function loadMindMapPositions() {
@@ -897,7 +899,7 @@ function TreeNode({ node, selectedId, onSelect, progressMap, depth = 0 }) {
   );
 }
 
-function Sidebar({ user, professionalMode = false, semesters, selectedSemester, subjects, selectedSubjectId, documents, lectures, lectureView, selectedLectureId, onSemester, onSubject, onAddSemester, onAddSubject, onDeleteSubject, onDocument, onDeleteDocument, tree, selectedNodeId, onNode, progressMap, onUpload, onLectures, onLecture, onStartLecture, onLogout }) {
+function Sidebar({ user, professionalMode = false, semesters, selectedSemester, subjects, selectedSubjectId, documents, lectures, lectureView, selectedLectureId, onSemester, onSubject, onAddSemester, onAddSubject, onDeleteSubject, onDocument, onDeleteDocument, tree, selectedNodeId, onNode, progressMap, onUpload, onLectures, onLecture, onStartLecture, onBilling, onLogout }) {
   const panel = useResizablePanel({
     storageKey: "study_left_panel",
     defaultWidth: 286,
@@ -935,10 +937,63 @@ function Sidebar({ user, professionalMode = false, semesters, selectedSemester, 
       {tree.length > 0 && <div className="sidebar-section tree-section"><div className="section-heading"><button className="section-link map-home-link" onClick={() => { updateStudyHash(null); onNode(null); }}>{professionalMode ? "Global map" : "Study map"}</button><span className="tree-count">{flattenNodes(tree).filter((node) => node.node_type === "subtopic").length} nodes</span></div><div className="tree-list">{tree.map((node) => <TreeNode key={node.id} node={node} selectedId={selectedNodeId} onSelect={onNode} progressMap={progressMap} />)}</div></div>}
       <div className="sidebar-bottom">
         <button className="upload-side-button" onClick={onUpload}><Icon name="upload" size={16} /><span>{professionalMode ? "Upload PDF" : "Upload material"}</span><kbd>U</kbd></button>
+        <button className="billing-button" onClick={onBilling}><Icon name="sparkle" size={15} /><span>{user?.subscription_plan === "free" ? "Upgrade plan" : "Manage subscription"}</span><small>{(user?.subscription_plan || "free").replace("_", " ")}</small></button>
         <div className="profile-row"><div className="avatar">{initials(user?.full_name || user?.email)}</div><div className="profile-copy"><strong>{user?.full_name || (professionalMode ? "Professional" : "Student")}</strong><span>{professionalMode ? "Professional account" : user?.email || "Your account"}</span></div><button className="icon-button" onClick={onLogout} title="Log out"><Icon name="logout" size={16} /></button></div>
       </div>
     </aside>
   );
+}
+
+function BillingModal({ user, token, onClose, onPlanChange }) {
+  const [subscription, setSubscription] = useState(null);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+  const targetPlan = user?.account_type === "professional" ? "professional" : "student_pro";
+
+  async function loadSubscription() {
+    try {
+      const current = await api.subscription(token);
+      setSubscription(current);
+      await onPlanChange?.();
+    } catch (err) {
+      setError(err.message || "Subscription status could not be loaded.");
+    }
+  }
+
+  useEffect(() => { loadSubscription(); }, []);
+  useEffect(() => {
+    if (subscription?.status !== "pending") return undefined;
+    const timer = window.setInterval(loadSubscription, 2500);
+    return () => window.clearInterval(timer);
+  }, [subscription?.status]);
+
+  async function checkout() {
+    setBusy(true);
+    setError("");
+    try {
+      const { url } = await api.createCheckout(targetPlan, token);
+      window.location.assign(url);
+    } catch (err) {
+      setError(err.message || "Checkout could not be opened.");
+      setBusy(false);
+    }
+  }
+
+  async function manage() {
+    setBusy(true);
+    setError("");
+    try {
+      const { url } = await api.createBillingPortal(token);
+      window.location.assign(url);
+    } catch (err) {
+      setError(err.message || "The billing portal could not be opened.");
+      setBusy(false);
+    }
+  }
+
+  const active = ["active", "trialing"].includes(subscription?.status);
+  const planLabel = targetPlan === "professional" ? "Professional" : "Student Pro";
+  return <div className="modal-backdrop" onMouseDown={(event) => event.target === event.currentTarget && !busy && onClose()}><div className="modal-card billing-modal"><button className="modal-close" disabled={busy} onClick={onClose}><Icon name="close" size={18} /></button><div className="modal-icon"><Icon name="sparkle" size={23} /></div><p className="eyebrow">Stripe subscription</p><h2>{active ? `${planLabel} is active.` : `Upgrade to ${planLabel}.`}</h2><p className="modal-copy">{active ? "Your paid limits are active and renew through Stripe. Use the secure billing portal to update payment details or cancel." : "Checkout and card handling happen on Stripe. Your paid limits activate only after a signed Stripe webhook confirms the subscription."}</p>{subscription && <div className="billing-status"><span>Current plan</span><strong>{(subscription.plan || "free").replace("_", " ")}</strong><span>Status</span><strong>{subscription.status}</strong>{subscription.current_period_end && <><span>Current period ends</span><strong>{formatDate(subscription.current_period_end, { year: "numeric", month: "short", day: "numeric" })}</strong></>}</div>}{error && <div className="form-error">{error}</div>}<button className="primary-button full" disabled={busy || !subscription} onClick={subscription?.can_manage ? manage : checkout}>{busy ? "Opening Stripe..." : subscription?.can_manage ? "Manage billing" : `Choose ${planLabel}`}<Icon name="arrow" size={17} /></button><small className="billing-note">Access follows Stripe’s webhook-confirmed subscription status; a redirect alone never unlocks features.</small></div></div>;
 }
 
 function SearchMapModal({ tree, selectedId, progressMap = {}, onClose, onNode, professionalMode = false }) {
@@ -1117,24 +1172,40 @@ function buildRadialMindMap(tree = [], rootTitle = "Study map") {
     });
   };
 
+  const totalLeaves = tree.reduce((sum, node) => sum + countLeaves(node), 0);
+  const fullCircle = Math.PI * 2;
+  const singleBranchSpan = Math.min(
+    fullCircle - 0.7,
+    Math.max(2.8, totalLeaves * 0.2),
+  );
+  const mapSpan = tree.length === 1 ? singleBranchSpan : fullCircle;
+
   if (tree.length) {
-    const start = tree.length === 1 ? -Math.PI / 2 - 0.9 : -Math.PI / 2;
-    const span = tree.length === 1 ? 1.8 : Math.PI * 2;
+    // A single PDF still receives almost a complete orbit when it has lots of
+    // content. Keeping the small opening at the bottom leaves a clean visual
+    // route from the map root through the PDF and subtopic nodes.
+    const start = tree.length === 1
+      ? -Math.PI / 2 - mapSpan / 2
+      : -Math.PI / 2;
     let cursor = start;
-    const totalLeaves = tree.reduce((sum, node) => sum + countLeaves(node), 0);
     tree.forEach((node) => {
-      const branchSpan = span * (countLeaves(node) / totalLeaves);
+      const branchSpan = mapSpan * (countLeaves(node) / totalLeaves);
       addBranch(node, "study-map-root", cursor, cursor + branchSpan, 1);
       cursor += branchSpan;
     });
   }
 
   const maxDepth = Math.max(...rawNodes.map((node) => node.depth), 1);
-  const totalLeaves = tree.reduce((sum, node) => sum + countLeaves(node), 0);
-  const minimumOuterRadius = totalLeaves > 1 ? (totalLeaves * 112) / (Math.PI * 2) : 190;
-  const outerRadius = Math.max(maxDepth * 165, minimumOuterRadius);
-  const innerLayerGap = Math.min(230, outerRadius / maxDepth);
-  const center = Math.max(430, outerRadius + 105);
+  const leafSpacing = 122;
+  const minimumOuterRadius = totalLeaves > 1
+    ? (totalLeaves * leafSpacing) / mapSpan
+    : 210;
+  const outerRadius = Math.max(maxDepth * 190, minimumOuterRadius);
+  const innerLayerGap = Math.min(
+    260,
+    Math.max(180, outerRadius / (maxDepth + 0.6)),
+  );
+  const center = Math.max(460, outerRadius + 145);
   const nodes = rawNodes.map((node) => {
     const radius = node.depth === maxDepth || node.node_type === "subtopic"
       ? outerRadius
@@ -1144,27 +1215,48 @@ function buildRadialMindMap(tree = [], rootTitle = "Study map") {
   return { nodes, edges, size: center * 2 };
 }
 
-function globalMapTree(tree, expandedTopicId) {
-  return tree.map((node) => ({
-    ...node,
-    children: (node.children || [])
-      .filter((child) => child.node_type !== "subtopic" || node.id === expandedTopicId)
-      .map((child) => ({
-        ...child,
-        children: child.node_type === "subtopic" ? [] : globalMapTree([child], expandedTopicId)[0].children,
-      })),
-  }));
+function globalMapTree(tree, expandedSubtopicId) {
+  const mapNode = (node, mapDepth = 0) => {
+    const originalChildren = node.children || [];
+    const hasMapChildren = originalChildren.length > 0;
+    const showChildren = mapDepth === 0 || node.id === expandedSubtopicId;
+    return {
+      ...node,
+      mapDepth,
+      hasMapChildren,
+      children: showChildren
+        ? originalChildren.map((child) => mapNode(child, mapDepth + 1))
+        : [],
+    };
+  };
+  return tree.map((node) => mapNode(node));
 }
 
-function RadialMindMapNode({ node, onNode, onTopicToggle, onMoveStart, selectedId, progressMap, dragging, expanded }) {
+function RadialMindMapNode({ node, onNode, onSubtopicToggle, onMoveStart, selectedId, progressMap, dragging, expanded }) {
   const isRoot = node.node_type === "root";
-  const isLeaf = node.node_type === "subtopic";
-  const isTopic = node.node_type === "topic";
+  const isPdfTopic = !isRoot && node.mapDepth === 0;
+  const isExpandableSubtopic = !isRoot && node.mapDepth >= 1 && node.hasMapChildren;
+  const isContentTopic = !isRoot && !node.hasMapChildren;
   const completed = progressMap[node.id]?.status === "completed";
-  const className = `mindmap-radial-node ${isRoot ? "mindmap-radial-root" : isLeaf ? "mindmap-radial-leaf" : node.node_type === "chapter" ? "mindmap-radial-chapter" : "mindmap-radial-topic"} ${selectedId === node.id ? "selected" : ""} ${completed ? "completed" : ""} ${dragging ? "dragging" : ""} ${expanded ? "expanded" : ""}`;
-  const content = <><span className="mindmap-radial-label">{node.heading_number || (isRoot ? "MAP" : node.node_type === "chapter" ? "CHAPTER" : "TOPIC")}</span><strong title={node.title}>{node.title}</strong>{isLeaf && <small>{completed ? "Completed" : "Open content"}</small>}{isTopic && <small>{expanded ? "Hide subtopics" : "Show subtopics"}</small>}</>;
+  const visualClass = isRoot
+    ? "mindmap-radial-root"
+    : isPdfTopic
+      ? "mindmap-radial-chapter"
+      : isExpandableSubtopic
+        ? "mindmap-radial-topic"
+        : "mindmap-radial-leaf";
+  const className = `mindmap-radial-node ${visualClass} ${selectedId === node.id ? "selected" : ""} ${completed ? "completed" : ""} ${dragging ? "dragging" : ""} ${expanded ? "expanded" : ""}`;
+  const mapLabel = isRoot
+    ? "MAP"
+    : isPdfTopic
+      ? "TOPIC / PDF"
+      : isExpandableSubtopic
+        ? "SUBTOPIC"
+        : "CONTENT TOPIC";
+  const content = <><span className="mindmap-radial-label">{mapLabel}</span><strong title={node.title}>{node.title}</strong>{isPdfTopic && <small>Subtopics shown</small>}{isExpandableSubtopic && <small>{expanded ? "Hide content topics" : "Show content topics"}</small>}{isContentTopic && <small>{completed ? "Completed" : "Open Learn page"}</small>}</>;
   if (isRoot) return <a href="#study-map" draggable={false} className={className} style={{ left: node.x, top: node.y }} onPointerDown={(event) => onMoveStart(event, node)} onClick={(event) => { event.preventDefault(); updateStudyHash(null); onNode(null); }}>{content}</a>;
-  if (isTopic) return <a href={studyNodeHref(node)} draggable={false} className={className} style={{ left: node.x, top: node.y }} aria-expanded={expanded} onPointerDown={(event) => onMoveStart(event, node)} onClick={(event) => { event.preventDefault(); onTopicToggle(node.id); }}>{content}</a>;
+  if (isPdfTopic) return <div className={className} style={{ left: node.x, top: node.y }} onPointerDown={(event) => onMoveStart(event, node)}>{content}</div>;
+  if (isExpandableSubtopic) return <a href={studyNodeHref(node)} draggable={false} className={className} style={{ left: node.x, top: node.y }} aria-expanded={expanded} onPointerDown={(event) => onMoveStart(event, node)} onClick={(event) => { event.preventDefault(); onSubtopicToggle(node.id); }}>{content}</a>;
   return <a href={studyNodeHref(node)} draggable={false} className={className} style={{ left: node.x, top: node.y }} onPointerDown={(event) => onMoveStart(event, node)} onClick={(event) => { event.preventDefault(); updateStudyHash(node); onNode(node.id); }}>{content}</a>;
 }
 
@@ -1172,8 +1264,8 @@ function FullStudyMindMap({ tree, onNode, rootTitle, selectedId, progressMap = {
   const minZoom = 0.35;
   const maxZoom = 1.6;
   const zoomStep = 0.1;
-  const [expandedTopicId, setExpandedTopicId] = useState(null);
-  const visibleTree = useMemo(() => globalMapTree(tree, expandedTopicId), [tree, expandedTopicId]);
+  const [expandedSubtopicId, setExpandedSubtopicId] = useState(null);
+  const visibleTree = useMemo(() => globalMapTree(tree, expandedSubtopicId), [tree, expandedSubtopicId]);
   const layout = useMemo(() => buildRadialMindMap(visibleTree, rootTitle), [visibleTree, rootTitle]);
   const panelRef = useRef(null);
   const scrollRef = useRef(null);
@@ -1234,7 +1326,7 @@ function FullStudyMindMap({ tree, onNode, rootTitle, selectedId, progressMap = {
   useEffect(() => {
     const frame = window.requestAnimationFrame(centerMap);
     return () => window.cancelAnimationFrame(frame);
-  }, [layout.size, isFullscreen, expandedTopicId]);
+  }, [layout.size, isFullscreen, expandedSubtopicId]);
 
   useEffect(() => {
     const anchor = zoomAnchorRef.current;
@@ -1444,8 +1536,8 @@ function FullStudyMindMap({ tree, onNode, rootTitle, selectedId, progressMap = {
     if (next) setHandActive(false);
   }
 
-  function toggleTopicSubtopics(topicId) {
-    setExpandedTopicId((current) => current === topicId ? null : topicId);
+  function toggleSubtopicContent(subtopicId) {
+    setExpandedSubtopicId((current) => current === subtopicId ? null : subtopicId);
   }
 
   function resetNodePositions() {
@@ -1508,9 +1600,9 @@ function FullStudyMindMap({ tree, onNode, rootTitle, selectedId, progressMap = {
         </div>
       </div>
       <div className="mindmap-legend" aria-label="Mind map legend">
-        <span><i className="legend-dot chapter" />Chapter</span>
-        <span><i className="legend-dot topic" />Topic</span>
-        <span><i className="legend-dot subtopic" />Subtopic · opens content</span>
+        <span><i className="legend-dot chapter" />Topic / PDF</span>
+        <span><i className="legend-dot topic" />Subtopic · click to expand</span>
+        <span><i className="legend-dot subtopic" />Content topic · opens Learn</span>
       </div>
       <div
         className={`mindmap-radial-scroll ${handActive ? "hand-tool" : ""} ${panning ? "panning" : ""} ${arrangeActive ? "arrange-tool" : ""} ${draggingNodeId !== null ? "dragging-node" : ""}`}
@@ -1531,11 +1623,11 @@ function FullStudyMindMap({ tree, onNode, rootTitle, selectedId, progressMap = {
                 return <line key={`${edge.source}-${edge.target}`} x1={source.x} y1={source.y} x2={target.x} y2={target.y} className={`mindmap-line mindmap-line-${target.node_type}`} />;
               })}
             </svg>
-            {positionedNodes.map((node) => <RadialMindMapNode key={node.id} node={node} onNode={onNode} onTopicToggle={toggleTopicSubtopics} onMoveStart={startNodeMove} selectedId={selectedId} progressMap={progressMap} dragging={draggingNodeId === node.id} expanded={expandedTopicId === node.id} />)}
+            {positionedNodes.map((node) => <RadialMindMapNode key={node.id} node={node} onNode={onNode} onSubtopicToggle={toggleSubtopicContent} onMoveStart={startNodeMove} selectedId={selectedId} progressMap={progressMap} dragging={draggingNodeId === node.id} expanded={expandedSubtopicId === node.id} />)}
           </div>
         </div>
       </div>
-      <p className="mindmap-hint">{arrangeActive ? "Arrange mode · drag any circle to place it · click a topic to reveal its subtopics" : expandedTopicId ? "Topic expanded · click a subtopic to open its content · click the topic again to close it" : handActive ? "Global map · click a topic to reveal its subtopics · drag to move the canvas" : "Global map · click a topic to reveal its subtopics"}</p>
+      <p className="mindmap-hint">{arrangeActive ? "Arrange mode · drag any circle to place it · PDF topics and subtopics stay visible" : expandedSubtopicId ? "Subtopic expanded · click a content topic to open its Learn page" : handActive ? "Global map · click a subtopic to reveal its content topics · drag to move the canvas" : "Global map · click a subtopic to reveal its content topics"}</p>
     </section>
   );
 }
@@ -2095,15 +2187,24 @@ function UploadModal({ subject, token, onClose, onDone, professionalMode = false
   const [busy, setBusy] = useState(false);
   const [stage, setStage] = useState("idle");
   const [error, setError] = useState("");
-  const stageTimersRef = useRef([]);
+  const [jobProgress, setJobProgress] = useState(0);
+  const mountedRef = useRef(true);
 
-  useEffect(() => () => {
-    stageTimersRef.current.forEach((timer) => clearTimeout(timer));
-  }, []);
+  useEffect(() => () => { mountedRef.current = false; }, []);
 
-  function clearStageTimers() {
-    stageTimersRef.current.forEach((timer) => clearTimeout(timer));
-    stageTimersRef.current = [];
+  async function waitForJob(jobId) {
+    while (mountedRef.current) {
+      const job = await api.uploadJob(jobId, token);
+      if (!mountedRef.current) return null;
+      setStage(job.stage);
+      setJobProgress(job.progress);
+      if (job.status === "completed") return job;
+      if (job.status === "failed") {
+        throw new Error(job.error_message || "The PDF could not be processed.");
+      }
+      await new Promise((resolve) => setTimeout(resolve, 1500));
+    }
+    return null;
   }
 
   async function upload(event) {
@@ -2111,21 +2212,22 @@ function UploadModal({ subject, token, onClose, onDone, professionalMode = false
     if (!file) return;
     setBusy(true);
     setStage("uploading");
+    setJobProgress(2);
     setError("");
-    clearStageTimers();
-    stageTimersRef.current = [
-      setTimeout(() => setStage("indexing"), 900),
-      setTimeout(() => setStage(kind === "study" ? "preparing" : "mapping"), 3000),
-    ];
     try {
-      if (kind === "study") await api.uploadStudy(subject.id, file, token);
-      else await api.uploadAssignment(subject.id, file, token);
-      clearStageTimers();
+      const job = kind === "study"
+        ? await api.uploadStudy(subject.id, file, token)
+        : await api.uploadAssignment(subject.id, file, token);
+      setStage("queued");
+      setJobProgress(job.progress || 5);
+      const completed = await waitForJob(job.id);
+      if (!completed) return;
       setStage("complete");
+      setJobProgress(100);
       setTimeout(() => onDone(kind === "study" ? "Study material processed" : "Assignment mapped to the study tree"), 900);
     } catch (err) {
-      clearStageTimers();
       setStage("idle");
+      setJobProgress(0);
       setError(err.message);
     } finally {
       setBusy(false);
@@ -2133,14 +2235,19 @@ function UploadModal({ subject, token, onClose, onDone, professionalMode = false
   }
   const statusText = {
     uploading: "Uploading PDF...",
-    indexing: "Organizing and indexing chunks...",
-    preparing: "Preparing the study map...",
+    queued: "Queued for processing...",
+    starting: "Starting the background job...",
+    retrying: "Retrying safely...",
+    extracting: "Extracting PDF text...",
+    organizing: "Organizing the study map...",
+    generating: "Generating learning material...",
+    indexing: "Indexing chunks...",
     mapping: "Mapping assignment chunks...",
     complete: "Completed. Closing this window...",
   }[stage];
-  const progressStage = stage === "complete" ? 3 : stage === "preparing" || stage === "mapping" ? 2 : stage === "indexing" ? 1 : 0;
+  const progressStage = jobProgress >= 100 ? 3 : jobProgress >= 30 ? 2 : jobProgress >= 5 ? 1 : 0;
 
-  return <div className="modal-backdrop" onMouseDown={(event) => event.target === event.currentTarget && !busy && stage !== "complete" && onClose()}><div className="modal-card upload-modal"><button className="modal-close" disabled={busy || stage === "complete"} onClick={onClose}><Icon name="close" size={18} /></button><div className={`modal-icon ${stage === "complete" ? "complete" : ""}`}><Icon name={stage === "complete" ? "check" : "upload"} size={24} /></div><p className="eyebrow">{professionalMode ? "Add reference" : "Add material"}</p><h2>{stage === "complete" ? "PDF is ready." : professionalMode ? `Add a PDF to ${subject?.name || "this folder"}.` : "Feed the subject."}</h2><p className="modal-copy">{stage === "complete" ? `Your ${professionalMode ? "folder" : "study space"} has been updated.` : professionalMode ? "The PDF will be indexed, added to the folder, and connected to its global knowledge map." : "Study PDFs grow the map. Assignment PDFs become scoped practice."}</p>{!professionalMode && <div className="upload-switch"><button type="button" disabled={busy || stage === "complete"} className={kind === "study" ? "active" : ""} onClick={() => setKind("study")}><Icon name="book" size={16} />Study PDF</button><button type="button" disabled={busy || stage === "complete"} className={kind === "assignment" ? "active" : ""} onClick={() => setKind("assignment")}><Icon name="file" size={16} />Assignment PDF</button></div>}<form onSubmit={upload}><label className={`dropzone ${file ? "has-file" : ""}`}><input disabled={busy || stage === "complete"} type="file" accept="application/pdf,.pdf" onChange={(event) => setFile(event.target.files?.[0])} />{file ? <><Icon name="check" size={26} /><strong>{file.name}</strong><span>{stage === "idle" ? "Ready to process" : statusText}</span></> : <><Icon name="upload" size={26} /><strong>Drop a PDF here</strong><span>or click to browse</span></>}</label>{(busy || stage === "complete") && <div className={`upload-status ${stage}`}><div className="upload-status-heading"><span className="spinner upload-spinner" />{statusText}</div><div className="upload-steps"><span className={progressStage >= 1 ? "done" : ""}>Upload</span><span className={progressStage >= 2 ? "done" : ""}>Index</span><span className={progressStage >= 3 ? "done" : ""}>Ready</span></div><small>Please keep this window open until processing is complete.</small></div>}{error && <div className="form-error">{error}</div>}<button className="primary-button full" disabled={!file || busy || stage === "complete"}>{stage === "complete" ? "Completed" : busy ? statusText : "Process PDF"}{stage === "complete" ? <Icon name="check" size={17} /> : <Icon name="arrow" size={17} />}</button></form></div></div>;
+  return <div className="modal-backdrop" onMouseDown={(event) => event.target === event.currentTarget && !busy && stage !== "complete" && onClose()}><div className="modal-card upload-modal"><button className="modal-close" disabled={busy || stage === "complete"} onClick={onClose}><Icon name="close" size={18} /></button><div className={`modal-icon ${stage === "complete" ? "complete" : ""}`}><Icon name={stage === "complete" ? "check" : "upload"} size={24} /></div><p className="eyebrow">{professionalMode ? "Add reference" : "Add material"}</p><h2>{stage === "complete" ? "PDF is ready." : professionalMode ? `Add a PDF to ${subject?.name || "this folder"}.` : "Feed the subject."}</h2><p className="modal-copy">{stage === "complete" ? `Your ${professionalMode ? "folder" : "study space"} has been updated.` : professionalMode ? "The PDF will be indexed, added to the folder, and connected to its global knowledge map." : "Study PDFs grow the map. Assignment PDFs become scoped practice."}</p>{!professionalMode && <div className="upload-switch"><button type="button" disabled={busy || stage === "complete"} className={kind === "study" ? "active" : ""} onClick={() => setKind("study")}><Icon name="book" size={16} />Study PDF</button><button type="button" disabled={busy || stage === "complete"} className={kind === "assignment" ? "active" : ""} onClick={() => setKind("assignment")}><Icon name="file" size={16} />Assignment PDF</button></div>}<form onSubmit={upload}><label className={`dropzone ${file ? "has-file" : ""}`}><input disabled={busy || stage === "complete"} type="file" accept="application/pdf,.pdf" onChange={(event) => setFile(event.target.files?.[0])} />{file ? <><Icon name="check" size={26} /><strong>{file.name}</strong><span>{stage === "idle" ? "Ready to process" : statusText}</span></> : <><Icon name="upload" size={26} /><strong>Drop a PDF here</strong><span>or click to browse</span></>}</label>{(busy || stage === "complete") && <div className={`upload-status ${stage}`}><div className="upload-status-heading"><span className="spinner upload-spinner" />{statusText}</div><div className="upload-steps"><span className={progressStage >= 1 ? "done" : ""}>Upload</span><span className={progressStage >= 2 ? "done" : ""}>Process</span><span className={progressStage >= 3 ? "done" : ""}>Ready</span></div><small>The server is processing this as a background job with durable status.</small></div>}{error && <div className="form-error">{error}</div>}<button className="primary-button full" disabled={!file || busy || stage === "complete"}>{stage === "complete" ? "Completed" : busy ? statusText : "Process PDF"}{stage === "complete" ? <Icon name="check" size={17} /> : <Icon name="arrow" size={17} />}</button></form></div></div>;
 }
 
 function WorkspaceModal({ kind, semesters, selectedSemesterId, token, onClose, onCreated }) {
@@ -2508,6 +2615,7 @@ function App() {
   const [loading, setLoading] = useState(false);
   const [toast, setToast] = useState("");
   const [uploadOpen, setUploadOpen] = useState(false);
+  const [billingOpen, setBillingOpen] = useState(false);
   const [searchOpen, setSearchOpen] = useState(false);
   const [workspaceModal, setWorkspaceModal] = useState(null);
   const [activeTest, setActiveTest] = useState(null);
@@ -2548,6 +2656,21 @@ function App() {
       })
       .catch(() => {});
     return () => { cancelled = true; };
+  }, [session?.token]);
+
+  useEffect(() => {
+    if (!session?.token) return;
+    const url = new URL(window.location.href);
+    const billingResult = url.searchParams.get("billing");
+    if (!billingResult) return;
+    url.searchParams.delete("billing");
+    window.history.replaceState(null, "", `${url.pathname}${url.search}${url.hash}`);
+    if (billingResult === "success") {
+      setBillingOpen(true);
+      notify("Payment received. Waiting for Stripe to confirm activation.");
+    } else {
+      notify("Checkout was cancelled. No subscription change was made.");
+    }
   }, [session?.token]);
 
   useEffect(() => {
@@ -2803,6 +2926,13 @@ function App() {
     localStorage.setItem("study_token", nextSession.token);
     localStorage.setItem("study_user", JSON.stringify(nextSession.user));
     setSession(nextSession);
+  }
+
+  async function refreshAccount() {
+    if (!session?.token) return;
+    const user = await api.me(session.token);
+    localStorage.setItem("study_user", JSON.stringify(user));
+    setSession((current) => current ? { ...current, user } : current);
   }
 
   function chooseSemester(id) {
@@ -3073,6 +3203,7 @@ function App() {
         onLectures={chooseLectures}
         onLecture={chooseLecture}
         onStartLecture={createLecture}
+        onBilling={() => setBillingOpen(true)}
         onLogout={logout}
       />
       <main className="main-area">
@@ -3129,6 +3260,7 @@ function App() {
       {workspaceModal && <WorkspaceModal kind={workspaceModal} semesters={semesters} selectedSemesterId={selectedSemesterId} token={session.token} onClose={() => setWorkspaceModal(null)} onCreated={handleWorkspaceCreated} />}
       {searchOpen && <SearchMapModal tree={tree} selectedId={selectedNodeId} progressMap={progressMap} onClose={() => setSearchOpen(false)} onNode={navigateToNode} professionalMode={isProfessional} />}
       {uploadOpen && <UploadModal subject={selectedSubject} token={session.token} onClose={() => setUploadOpen(false)} onDone={handleUploadDone} professionalMode={isProfessional} />}
+      {billingOpen && <BillingModal user={session.user} token={session.token} onClose={() => setBillingOpen(false)} onPlanChange={refreshAccount} />}
       {!isProfessional && activeTest && <TestModal test={activeTest} subjectId={selectedSubjectId} token={session.token} onClose={() => setActiveTest(null)} onSubmitted={() => { refreshSubject(); notify("Your analytics are saved."); }} />}
       {toast && <div className="toast"><Icon name="check" size={16} />{toast}</div>}
       {error && <button className="error-toast" onClick={() => setError("")}>{error}<Icon name="close" size={15} /></button>}

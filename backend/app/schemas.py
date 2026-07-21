@@ -82,6 +82,7 @@ class UserResponse(BaseModel):
     account_type: Literal["student", "professional"]
     auth_provider: Literal["password", "google"] = "password"
     email_verified: bool = False
+    subscription_plan: Literal["free", "student_pro", "professional"] = "free"
 
     model_config = ConfigDict(from_attributes=True)
 
@@ -247,8 +248,41 @@ class DocumentResponse(BaseModel):
     document_type: str
     subject_id: int
     description: str
+    processing_status: str = "processed"
 
     model_config = ConfigDict(from_attributes=True)
+
+
+class UploadJobResponse(BaseModel):
+    id: str
+    subject_id: int
+    job_type: Literal["study", "assignment"]
+    status: Literal["queued", "processing", "completed", "failed"]
+    stage: str
+    progress: int = Field(ge=0, le=100)
+    error_message: str | None = None
+    result: dict = Field(default_factory=dict)
+    created_at: datetime
+    started_at: datetime | None = None
+    completed_at: datetime | None = None
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+class CheckoutRequest(RequestModel):
+    plan: Literal["student_pro", "professional"]
+
+
+class RedirectResponse(BaseModel):
+    url: str
+
+
+class SubscriptionResponse(BaseModel):
+    plan: Literal["free", "student_pro", "professional"]
+    status: str
+    cancel_at_period_end: bool = False
+    current_period_end: datetime | None = None
+    can_manage: bool = False
 
 
 class StudyTreeNode(BaseModel):

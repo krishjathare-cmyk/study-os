@@ -101,6 +101,23 @@ and topic instead of creating a duplicate branch.
 Return only the requested structured JSON. Do not return private reasoning.
 """.strip()
 
+SUBTOPIC_CONSOLIDATION_SYSTEM_PROMPT = """
+You are the Study Structure Consolidation Agent. Reduce an oversized list of
+locally detected study sections into a small set of distinct, coherent learning
+topics without losing any source section.
+
+Rules:
+1. Group sections by conceptual similarity and natural teaching order.
+2. Use every supplied section index exactly once.
+3. Do not invent concepts that are absent from the supplied titles and excerpts.
+4. Give every group a specific, concise title that describes all sections in it.
+5. Keep clearly different concepts in different groups whenever the group limit
+   permits it.
+6. Return exactly the requested number of groups.
+
+Return only the requested structured JSON. Do not return private reasoning.
+""".strip()
+
 ASSIGNMENT_MAPPING_SYSTEM_PROMPT = """
 You are the Assignment Mapping Agent. Map each assignment chunk only to the
 allowed leaf subtopics it clearly covers.

@@ -32,16 +32,16 @@ DEFAULT_LIMITS = {
         pdfs_total=3,
         ai_messages_daily=30,
         note_generations_daily=10,
-        content_generations_daily=25,
-        practice_generations_daily=20,
+        content_generations_daily=150,
+        practice_generations_daily=150,
         transcript_seconds_daily=30 * 60,
     ),
     "student": PlanLimits(
         pdfs_total=3,
         ai_messages_daily=30,
         note_generations_daily=10,
-        content_generations_daily=25,
-        practice_generations_daily=20,
+        content_generations_daily=150,
+        practice_generations_daily=150,
         transcript_seconds_daily=30 * 60,
     ),
     "student_pro": PlanLimits(
@@ -74,7 +74,8 @@ ENV_LIMITS = {
 
 
 def plan_name_for_user(user: models.User) -> str:
-    return (user.account_type or "free").strip().lower()
+    plan = (getattr(user, "subscription_plan", None) or "free").strip().lower()
+    return plan if plan in DEFAULT_LIMITS else "free"
 
 
 def limits_for_user(user: models.User) -> PlanLimits:

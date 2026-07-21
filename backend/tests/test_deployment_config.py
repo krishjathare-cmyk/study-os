@@ -5,6 +5,7 @@ from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
 from app.auth import _jwt_secret
+from app.config import validate_runtime_config
 from app.llm_provider import _get_local_transcription_model
 from app.storage import WHISPER_MODEL_DIR
 
@@ -36,6 +37,44 @@ class DeploymentConfigTests(unittest.TestCase):
         ):
             with self.assertRaisesRegex(RuntimeError, "at least 32 bytes"):
                 _jwt_secret()
+
+    def test_production_rejects_localhost_and_missing_services(self):
+        with patch.dict(
+            os.environ,
+            {
+                "APP_ENV": "production",
+                "DATABASE_URL": "sqlite:///local.db",
+                "FRONTEND_URL": "http://localhost:5173",
+                "FRONTEND_ORIGINS": "http://localhost:5173",
+                "EMAIL_DELIVERY_MODE": "console",
+                "GOOGLE_CLIENT_ID": "",
+                "STRIPE_SECRET_KEY": "",
+            },
+            clear=False,
+        ):
+            with self.assertRaisesRegex(RuntimeError, "PostgreSQL"):
+                validate_runtime_config()
+
+    def test_complete_production_configuration_is_accepted(self):
+        configured = {
+            "APP_ENV": "production",
+            "DATABASE_URL": "postgresql+psycopg://user:password@db/study",
+            "FRONTEND_URL": "https://study.example.com",
+            "FRONTEND_ORIGINS": "https://study.example.com",
+            "EMAIL_DELIVERY_MODE": "smtp",
+            "JWT_SECRET": "a-unique-production-secret-that-is-long-enough",
+            "SMTP_HOST": "smtp.example.com",
+            "SMTP_USERNAME": "smtp-user",
+            "SMTP_PASSWORD": "smtp-password",
+            "SMTP_FROM_EMAIL": "no-reply@example.com",
+            "GOOGLE_CLIENT_ID": "google-client-id",
+            "STRIPE_SECRET_KEY": "stripe-secret",
+            "STRIPE_WEBHOOK_SECRET": "stripe-webhook-secret",
+            "STRIPE_PRICE_STUDENT_PRO": "price_student",
+            "STRIPE_PRICE_PROFESSIONAL": "price_professional",
+        }
+        with patch.dict(os.environ, configured, clear=True):
+            validate_runtime_config()
 
     def test_whisper_downloads_into_persistent_model_directory(self):
         whisper_model = Mock(return_value=object())
