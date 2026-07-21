@@ -7,11 +7,13 @@ from sqlalchemy.orm import Session
 
 from app import models
 from app.chunk_utils import split_text_into_chunks
-from app.llm_provider import infer_study_path
+from app.config import env_flag
+from app.llm_provider import consolidate_subtopics, infer_study_path
 from app.pdf_utils import StyledPDFLine, extract_styled_pdf_lines
 
 
 NODE_TYPES = {1: "chapter", 2: "topic", 3: "subtopic"}
+MAX_DOCUMENT_SUBTOPICS = 8
 CHAPTER_WORD_NUMBERS = {
     "one": "1",
     "two": "2",
@@ -501,12 +503,287 @@ def _apply_inferred_path(
     return output
 
 
+def _document_topic_title(filename: str) -> str:
+    title = Path(filename).stem.replace("_", " ").replace("-", " ")
+    title = re.sub(r"\s+", " ", title).strip()
+    return _clean_heading_title(title) or "Uploaded PDF"
+
+
+def _with_document_as_topic(
+    sections: list[OrganizedSection],
+    filename: str,
+) -> list[OrganizedSection]:
+    document_topic = NodeSpec(
+        title=_document_topic_title(filename),
+        level=2,
+        is_generated=False,
+        confidence=1.0,
+    )
+    output = []
+    section_parent_keys = {
+        (normalize_title(section.path[-2].title), section.path[-2].heading_number)
+        for section in sections
+        if len(section.path) >= 3
+        and not section.path[-2].is_generated
+        and not section.path[-1].is_generated
+    }
+
+    for section in sections:
+        path = section.path
+        text = section.text
+        if not path:
+            output.append(
+                OrganizedSection(
+                    path=[document_topic, _generated_spec("Overview", 3)],
+                    text=text,
+                )
+            )
+            continue
+
+        leaf = path[-1]
+        if leaf.is_generated and normalize_title(leaf.title) == "overview" and len(path) >= 2:
+            source = path[-2]
+            source_key = (normalize_title(source.title), source.heading_number)
+            if source_key in section_parent_keys:
+                section_topic = NodeSpec(
+                    title=source.title,
+                    level=2,
+                    heading_number=source.heading_number,
+                    is_generated=source.is_generated,
+                    confidence=source.confidence,
+                )
+                output.append(
+                    OrganizedSection(
+                        path=[document_topic, section_topic, leaf],
+                        text=text,
+                    )
+                )
+                continue
+
+            leaf = NodeSpec(
+                title=source.title,
+                level=3,
+                heading_number=source.heading_number,
+                is_generated=False,
+                confidence=source.confidence,
+            )
+            overview_prefix = "Overview\n"
+            if text.startswith(overview_prefix):
+                text = f"{leaf.title}\n{text[len(overview_prefix):]}"
+            output.append(OrganizedSection(path=[document_topic, leaf], text=text))
+            continue
+
+        leaf = NodeSpec(
+            title=leaf.title,
+            level=3,
+            heading_number=leaf.heading_number,
+            is_generated=leaf.is_generated,
+            confidence=leaf.confidence,
+        )
+
+        if len(path) >= 3 and not path[-2].is_generated:
+            parent = path[-2]
+            section_topic = NodeSpec(
+                title=parent.title,
+                level=2,
+                heading_number=parent.heading_number,
+                is_generated=parent.is_generated,
+                confidence=parent.confidence,
+            )
+            output.append(
+                OrganizedSection(
+                    path=[document_topic, section_topic, leaf],
+                    text=text,
+                )
+            )
+            continue
+
+        output.append(OrganizedSection(path=[document_topic, leaf], text=text))
+
+    return output
+
+
+def _section_path_key(section: OrganizedSection) -> tuple:
+    return tuple(
+        (spec.level, spec.heading_number or "", normalize_title(spec.title))
+        for spec in section.path
+    )
+
+
+def _distinct_section_candidates(
+    sections: list[OrganizedSection],
+) -> list[list[OrganizedSection]]:
+    candidates: list[list[OrganizedSection]] = []
+    candidate_indexes: dict[tuple, int] = {}
+    for section in sections:
+        if not section.path:
+            continue
+        key = _section_path_key(section)
+        candidate_index = candidate_indexes.get(key)
+        if candidate_index is None:
+            candidate_indexes[key] = len(candidates)
+            candidates.append([section])
+        else:
+            candidates[candidate_index].append(section)
+    return candidates
+
+
+def _validated_consolidation_plan(
+    plan: list[dict] | None,
+    candidate_count: int,
+    limit: int,
+) -> list[dict] | None:
+    if not isinstance(plan, list) or len(plan) != limit:
+        return None
+
+    expected_indexes = set(range(candidate_count))
+    seen_indexes: set[int] = set()
+    seen_titles: set[str] = set()
+    validated = []
+    for group in plan:
+        if not isinstance(group, dict):
+            return None
+        title = _clean_heading_title(str(group.get("title") or ""))
+        normalized_title = normalize_title(title)
+        indexes = group.get("section_indexes")
+        if (
+            not title
+            or normalized_title in seen_titles
+            or not isinstance(indexes, list)
+            or not indexes
+        ):
+            return None
+
+        clean_indexes = []
+        for index in indexes:
+            if (
+                isinstance(index, bool)
+                or not isinstance(index, int)
+                or index not in expected_indexes
+                or index in seen_indexes
+            ):
+                return None
+            seen_indexes.add(index)
+            clean_indexes.append(index)
+
+        seen_titles.add(normalized_title)
+        validated.append({"title": title, "section_indexes": clean_indexes})
+
+    if seen_indexes != expected_indexes:
+        return None
+    return validated
+
+
+def _fallback_consolidation_plan(
+    candidates: list[list[OrganizedSection]],
+    limit: int,
+) -> list[dict]:
+    candidate_count = len(candidates)
+    base_size, larger_groups = divmod(candidate_count, limit)
+    plan = []
+    cursor = 0
+    used_titles: set[str] = set()
+    for group_index in range(limit):
+        group_size = base_size + int(group_index < larger_groups)
+        indexes = list(range(cursor, cursor + group_size))
+        cursor += group_size
+        first_title = candidates[indexes[0]][0].path[-1].title
+        last_title = candidates[indexes[-1]][0].path[-1].title
+        title = first_title if len(indexes) == 1 else f"{first_title} – {last_title}"
+        title = _clean_heading_title(title)
+        normalized_title = normalize_title(title)
+        if normalized_title in used_titles:
+            title = _clean_heading_title(f"{title} Part {group_index + 1}")
+            normalized_title = normalize_title(title)
+        used_titles.add(normalized_title)
+        plan.append({"title": title, "section_indexes": indexes})
+    return plan
+
+
+def _common_parent_path(
+    candidates: list[list[OrganizedSection]],
+    indexes: list[int],
+) -> list[NodeSpec]:
+    parent_paths = [candidates[index][0].path[:-1] for index in indexes]
+    if not parent_paths:
+        return []
+    common_length = min(len(path) for path in parent_paths)
+    prefix_length = 0
+    for position in range(common_length):
+        first = parent_paths[0][position]
+        first_key = (first.level, first.heading_number or "", normalize_title(first.title))
+        if all(
+            (
+                path[position].level,
+                path[position].heading_number or "",
+                normalize_title(path[position].title),
+            ) == first_key
+            for path in parent_paths[1:]
+        ):
+            prefix_length += 1
+        else:
+            break
+    return list(parent_paths[0][:prefix_length])
+
+
+def _limit_document_subtopics(
+    sections: list[OrganizedSection],
+    limit: int = MAX_DOCUMENT_SUBTOPICS,
+) -> list[OrganizedSection]:
+    candidates = _distinct_section_candidates(sections)
+    if len(candidates) <= limit:
+        return sections
+
+    ai_candidates = [
+        {
+            "path": " > ".join(spec.title for spec in candidate[0].path),
+            "excerpt": "\n\n".join(section.text for section in candidate),
+        }
+        for candidate in candidates
+    ]
+    plan = _validated_consolidation_plan(
+        consolidate_subtopics(ai_candidates, max_subtopics=limit),
+        candidate_count=len(candidates),
+        limit=limit,
+    )
+    used_ai_plan = plan is not None
+    if plan is None:
+        plan = _fallback_consolidation_plan(candidates, limit)
+
+    consolidated = []
+    for group in plan:
+        indexes = group["section_indexes"]
+        grouped_sections = [
+            section
+            for index in indexes
+            for section in candidates[index]
+        ]
+        parent_path = _common_parent_path(candidates, indexes)
+        if not parent_path:
+            parent_path = list(grouped_sections[0].path[:1])
+        leaf = NodeSpec(
+            title=group["title"],
+            level=3,
+            is_generated=True,
+            confidence=0.82 if used_ai_plan else 0.55,
+        )
+        merged_text = "\n\n".join(section.text for section in grouped_sections).strip()
+        consolidated.append(
+            OrganizedSection(
+                path=[*parent_path, leaf],
+                text=f"{leaf.title}\n{merged_text}",
+            )
+        )
+    return consolidated
+
+
 def extract_outline_sections(
     text: str,
     filename: str,
     use_llm: bool | None = None,
     existing_paths: list[str] | None = None,
     styled_lines: list[StyledPDFLine] | None = None,
+    document_as_topic: bool = False,
 ) -> list[OrganizedSection]:
     lines, line_styles = _prepare_lines(text, styled_lines)
     body_font_size = _body_font_size(styled_lines or [])
@@ -624,6 +901,11 @@ def extract_outline_sections(
         )
         sections = _apply_inferred_path(sections, inferred_path)
 
+    if document_as_topic:
+        sections = _with_document_as_topic(sections, filename)
+        if env_flag("SUBTOPIC_CONSOLIDATION_ENABLED", False):
+            sections = _limit_document_subtopics(sections)
+
     return sections
 
 
@@ -696,6 +978,7 @@ def organize_document(
     document: models.Document,
     force: bool = False,
     use_llm: bool | None = None,
+    document_as_topic: bool = False,
 ) -> OrganizationResult:
     linked_count = (
         db.query(models.StudyNodeChunk)
@@ -726,6 +1009,7 @@ def organize_document(
         use_llm=use_llm,
         existing_paths=existing_subject_paths(db, document.subject_id),
         styled_lines=extract_styled_pdf_lines(document.file_path),
+        document_as_topic=document_as_topic,
     )
 
     # Do not hold a SQLite write lock while optional outline inference runs.

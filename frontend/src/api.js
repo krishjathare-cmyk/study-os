@@ -58,6 +58,9 @@ export const api = {
   resendVerification: (email) => json("POST", "/resend-verification", { email }),
   googleAuth: (body) => json("POST", "/auth/google", body),
   me: (token) => request("/me", {}, token),
+  subscription: (token) => request("/billing/subscription", {}, token),
+  createCheckout: (plan, token) => json("POST", "/billing/checkout", { plan }, token),
+  createBillingPortal: (token) => request("/billing/portal", { method: "POST" }, token),
   semesters: (token) => request("/semesters", {}, token),
   createSemester: (body, token) => json("POST", "/semesters", body, token),
   subjects: (semesterId, token) => request(`/semesters/${semesterId}/subjects`, {}, token),
@@ -108,4 +111,5 @@ export const api = {
     body.append("file", file);
     return request(`/subjects/${subjectId}/assignments`, { method: "POST", body }, token);
   },
+  uploadJob: (jobId, token) => request(`/upload-jobs/${jobId}`, {}, token),
 };

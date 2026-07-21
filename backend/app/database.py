@@ -28,7 +28,15 @@ if is_sqlite:
         "timeout": 60,
     }
 
-engine = create_engine(DATABASE_URL, connect_args=connect_args)
+engine_options = {
+    "connect_args": connect_args,
+    "pool_pre_ping": True,
+}
+if not is_sqlite:
+    # RDS can retire idle connections during maintenance or failover.
+    engine_options.update(pool_recycle=300)
+
+engine = create_engine(DATABASE_URL, **engine_options)
 
 
 if is_sqlite:

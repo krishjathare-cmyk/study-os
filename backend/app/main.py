@@ -1,6 +1,7 @@
 import logging
 import os
 import secrets
+from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from typing import Literal
 from uuid import uuid4
@@ -26,6 +27,7 @@ from fastapi import (
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from pydantic import ValidationError
+from sqlalchemy import text
 from sqlalchemy.orm import Session
 from app.vecor_store import (
     VectorStoreError,
@@ -48,7 +50,15 @@ from app.auth import (
     password_hash_needs_update,
     verify_password,
 )
-from app.database import Base, engine, get_db
+from app.config import validate_runtime_config
+from app.billing import (
+    BillingError,
+    create_checkout_url,
+    create_portal_url,
+    process_webhook,
+    subscription_payload,
+)
+from app.database import engine, get_db
 from app.email_service import EmailDeliveryError, send_verification_email
 from app.google_identity import GoogleIdentityError, verify_google_id_token
 from app.pdf_utils import PDFExtractionError, extract_text_from_pdf
@@ -103,7 +113,6 @@ from app.usage_limits import (
     usage_summary,
 )
 
-Base.metadata.create_all(bind=engine)
 logger = logging.getLogger(__name__)
 
 
@@ -118,73 +127,22 @@ def _configured_megabytes(name: str, default: int) -> int:
 MAX_PDF_UPLOAD_BYTES = _configured_megabytes("MAX_PDF_UPLOAD_MB", 50)
 MAX_AUDIO_CHUNK_BYTES = _configured_megabytes("MAX_AUDIO_CHUNK_MB", 25)
 
-# Add fields introduced after the first SQLite database was created.
-if engine.dialect.name == "sqlite":
-    with engine.begin() as connection:
-        user_columns = {
-            row[1]
-            for row in connection.exec_driver_sql(
-                "PRAGMA table_info(users)"
-            )
-        }
-        if "account_type" not in user_columns:
-            connection.exec_driver_sql(
-                "ALTER TABLE users "
-                "ADD COLUMN account_type VARCHAR NOT NULL DEFAULT 'student'"
-            )
-        if "auth_provider" not in user_columns:
-            connection.exec_driver_sql(
-                "ALTER TABLE users "
-                "ADD COLUMN auth_provider VARCHAR NOT NULL DEFAULT 'password'"
-            )
-        if "email_verified" not in user_columns:
-            # Accounts created before verification existed remain accessible.
-            connection.exec_driver_sql(
-                "ALTER TABLE users "
-                "ADD COLUMN email_verified BOOLEAN NOT NULL DEFAULT 1"
-            )
-        if "email_verified_at" not in user_columns:
-            connection.exec_driver_sql(
-                "ALTER TABLE users ADD COLUMN email_verified_at DATETIME"
-            )
-        if "verification_sent_at" not in user_columns:
-            connection.exec_driver_sql(
-                "ALTER TABLE users ADD COLUMN verification_sent_at DATETIME"
-            )
-        if "google_subject" not in user_columns:
-            connection.exec_driver_sql(
-                "ALTER TABLE users ADD COLUMN google_subject VARCHAR"
-            )
-        connection.exec_driver_sql(
-            "CREATE UNIQUE INDEX IF NOT EXISTS ix_users_google_subject "
-            "ON users (google_subject) WHERE google_subject IS NOT NULL"
-        )
-        columns = {
-            row[1]
-            for row in connection.exec_driver_sql(
-                "PRAGMA table_info(node_learning_contents)"
-            )
-        }
-        if "real_life_example" not in columns:
-            connection.exec_driver_sql(
-                "ALTER TABLE node_learning_contents "
-                "ADD COLUMN real_life_example TEXT NOT NULL DEFAULT ''"
-            )
-        if "structured_sections" not in columns:
-            connection.exec_driver_sql(
-                "ALTER TABLE node_learning_contents "
-                "ADD COLUMN structured_sections TEXT NOT NULL DEFAULT '[]'"
-            )
-
 UPLOAD_RETRY_MESSAGE = (
     "The PDF could not be fully processed into chunks. "
     "The incomplete upload was removed; please upload the PDF again."
 )
 
+@asynccontextmanager
+async def lifespan(_: FastAPI):
+    validate_runtime_config()
+    yield
+
+
 app = FastAPI(
     title="AI Study Assistant API",
     description="RAG-based study assistant for students",
-    version="0.1.0"
+    version="0.1.0",
+    lifespan=lifespan,
 )
 
 app.add_middleware(
@@ -359,6 +317,24 @@ def get_owned_subject(
     return subject
 
 
+def require_no_active_upload_jobs(
+    db: Session,
+    subject_id: int,
+    document_id: int | None = None,
+) -> None:
+    query = db.query(models.UploadJob.id).filter(
+        models.UploadJob.subject_id == subject_id,
+        models.UploadJob.status.in_(("queued", "processing")),
+    )
+    if document_id is not None:
+        query = query.filter(models.UploadJob.document_id == document_id)
+    if query.first() is not None:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Wait for PDF processing to finish before deleting this item.",
+        )
+
+
 def require_student_account(current_user: models.User):
     if current_user.account_type != "student":
         raise HTTPException(
@@ -431,8 +407,11 @@ def root():
 
 @app.get("/health")
 def health_check():
+    with engine.connect() as connection:
+        connection.execute(text("SELECT 1"))
     return {
-        "status": "ok"
+        "status": "ok",
+        "database": "reachable",
     }
 
 
@@ -776,6 +755,49 @@ def get_current_account(
     return current_user
 
 
+@app.get("/billing/subscription", response_model=schemas.SubscriptionResponse)
+def get_subscription(
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(get_current_user),
+):
+    return subscription_payload(db, current_user)
+
+
+@app.post("/billing/checkout", response_model=schemas.RedirectResponse)
+def create_checkout(
+    payload: schemas.CheckoutRequest,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(get_current_user),
+):
+    try:
+        return {"url": create_checkout_url(db, current_user, payload.plan)}
+    except BillingError as error:
+        db.rollback()
+        raise HTTPException(status_code=409, detail=str(error)) from error
+
+
+@app.post("/billing/portal", response_model=schemas.RedirectResponse)
+def create_billing_portal(
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(get_current_user),
+):
+    try:
+        return {"url": create_portal_url(db, current_user)}
+    except BillingError as error:
+        raise HTTPException(status_code=409, detail=str(error)) from error
+
+
+@app.post("/billing/webhook", include_in_schema=False)
+async def stripe_webhook(request: Request, db: Session = Depends(get_db)):
+    signature = request.headers.get("Stripe-Signature", "")
+    try:
+        process_webhook(db, await request.body(), signature)
+    except BillingError as error:
+        db.rollback()
+        raise HTTPException(status_code=400, detail=str(error)) from error
+    return {"received": True}
+
+
 @app.get("/me/usage", response_model=schemas.UsageSummaryResponse)
 def get_current_usage(
     db: Session = Depends(get_db),
@@ -847,6 +869,7 @@ def delete_subject(
     current_user: models.User = Depends(get_current_user),
 ):
     subject = get_owned_subject(db, subject_id, current_user.id)
+    require_no_active_upload_jobs(db, subject_id)
     documents = db.query(models.Document).filter(
         models.Document.subject_id == subject_id
     ).all()
@@ -970,7 +993,11 @@ def get_subjects(
     ).order_by(models.Subject.name).all()
 
 
-@app.post("/subjects/{subject_id}/documents", response_model=schemas.DocumentResponse)
+@app.post(
+    "/subjects/{subject_id}/documents",
+    response_model=schemas.UploadJobResponse,
+    status_code=status.HTTP_202_ACCEPTED,
+)
 def upload_document(
     subject_id: int,
     document_type: Literal["textbook"] = "textbook",
@@ -996,117 +1023,51 @@ def upload_document(
         max_bytes=MAX_PDF_UPLOAD_BYTES,
     )
 
-    try:
-        extracted_text = extract_text_from_pdf(file_path)
-    except PDFExtractionError as error:
-        if os.path.exists(file_path):
-            os.remove(file_path)
-        raise HTTPException(status_code=400, detail=str(error)) from error
-    if not extracted_text.strip():
-        if os.path.exists(file_path):
-            os.remove(file_path)
-        raise HTTPException(status_code=422, detail=UPLOAD_RETRY_MESSAGE)
-
     document = models.Document(
         filename=display_filename,
         file_path=file_path,
         document_type=document_type,
-        extracted_text=extracted_text,
-        subject_id=subject_id
+        extracted_text=None,
+        processing_status="queued",
+        subject_id=subject_id,
     )
-
-    db.add(document)
-    # Commit the upload before outline/content generation so SQLite is not
-    # held by a long-running AI or PDF organization step.
-    db.commit()
-    db.refresh(document)
-
-    initial_node_ids = {
-        row[0] for row in db.query(models.StudyNode.id).filter(
-            models.StudyNode.subject_id == subject_id
-        ).all()
-    }
     try:
-        # Upload organization is deliberately local-first. The explicit
-        # false prevents a fallback outline request from spending API credits.
-        organization = organize_document(db=db, document=document, use_llm=False)
-        if (
-            not organization.chunk_texts
-            or len(organization.chunk_texts) != len(organization.subtopic_ids)
-        ):
-            raise ValueError("The document did not produce a complete chunk set")
-        db.commit()
-
-        require_daily_capacity(
-            db,
-            current_user,
-            CONTENT_GENERATION,
-            len(organization.subtopic_ids),
-        )
-        if current_user.account_type == "student":
-            require_daily_capacity(
-                db,
-                current_user,
-                PRACTICE_GENERATION,
-                len(organization.subtopic_ids),
-            )
-
-        regenerate_learning_for_nodes(db, organization.subtopic_ids)
-        if current_user.account_type == "student":
-            regenerate_study_practice_for_nodes(db, organization.subtopic_ids)
-            pregenerate_topic_tests_for_nodes(
-                db,
-                current_user.id,
-                organization.subtopic_ids,
-            )
-        db.commit()
-        db.refresh(document)
-
-        index_chunks(
+        db.add(document)
+        db.flush()
+        job = models.UploadJob(
+            id=str(uuid4()),
             user_id=current_user.id,
             subject_id=subject_id,
             document_id=document.id,
-            filename=document.filename,
-            chunks=organization.chunk_texts,
-            subtopic_ids=organization.subtopic_ids,
+            job_type="study",
+            status="queued",
+            stage="queued",
+            progress=0,
         )
-        record_usage(db, current_user, PDF_UPLOAD)
-        record_usage(
-            db,
-            current_user,
-            CONTENT_GENERATION,
-            len(organization.subtopic_ids),
-        )
-        if current_user.account_type == "student":
-            record_usage(
-                db,
-                current_user,
-                PRACTICE_GENERATION,
-                len(organization.subtopic_ids),
-            )
+        db.add(job)
         db.commit()
-    except HTTPException as error:
-        _remove_failed_document_upload(
-            db=db,
-            user_id=current_user.id,
-            subject_id=subject_id,
-            document_id=document.id,
-            file_path=file_path,
-            initial_node_ids=initial_node_ids,
-        )
-        raise error
-    except Exception as error:
-        _remove_failed_document_upload(
-            db=db,
-            user_id=current_user.id,
-            subject_id=subject_id,
-            document_id=document.id,
-            file_path=file_path,
-            initial_node_ids=initial_node_ids,
-        )
-        raise HTTPException(status_code=422, detail=UPLOAD_RETRY_MESSAGE) from error
+        db.refresh(job)
+        return job
+    except Exception:
+        db.rollback()
+        if os.path.exists(file_path):
+            os.remove(file_path)
+        raise
 
-    return document
+
+@app.get("/upload-jobs/{job_id}", response_model=schemas.UploadJobResponse)
+def get_upload_job(
+    job_id: str,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(get_current_user),
+):
+    job = db.query(models.UploadJob).filter(
+        models.UploadJob.id == job_id,
+        models.UploadJob.user_id == current_user.id,
+    ).first()
+    if job is None:
+        raise HTTPException(status_code=404, detail="Upload job not found")
+    return job
 
 
 @app.get(
@@ -1163,6 +1124,7 @@ def delete_document(
     ).first()
     if document is None:
         raise HTTPException(status_code=404, detail="Study material not found")
+    require_no_active_upload_jobs(db, subject_id, document_id)
 
     chunk_ids = [
         row[0] for row in db.query(models.DocumentChunk.id).filter(
@@ -1408,6 +1370,7 @@ def organize_subject_documents(
             document=document,
             force=request.force,
             use_llm=request.use_llm,
+            document_as_topic=True,
         )
         content_node_ids.update(result.subtopic_ids)
         if result.skipped:
@@ -1754,7 +1717,8 @@ def _visualization_payload(visualization: models.NodeVisualization) -> dict:
 
 @app.post(
     "/subjects/{subject_id}/assignments",
-    response_model=schemas.AssignmentUploadResponse,
+    response_model=schemas.UploadJobResponse,
+    status_code=status.HTTP_202_ACCEPTED,
 )
 def upload_assignment(
     subject_id: int,
@@ -1780,110 +1744,35 @@ def upload_assignment(
         max_bytes=MAX_PDF_UPLOAD_BYTES,
     )
 
-    try:
-        extracted_text = extract_text_from_pdf(file_path)
-    except PDFExtractionError as error:
-        if os.path.exists(file_path):
-            os.remove(file_path)
-        raise HTTPException(status_code=400, detail=str(error)) from error
-    if not extracted_text.strip():
-        if os.path.exists(file_path):
-            os.remove(file_path)
-        raise HTTPException(status_code=422, detail=UPLOAD_RETRY_MESSAGE)
-
     assignment = models.AssignmentDocument(
         subject_id=subject_id,
         filename=display_filename,
         file_path=file_path,
-        extracted_text=extracted_text,
-        processing_status="processing",
+        extracted_text=None,
+        processing_status="queued",
     )
-    db.add(assignment)
-    db.flush()
-
     try:
-        chunks, affected_node_ids = create_and_map_assignment_chunks(db, assignment)
-        if not chunks:
-            raise ValueError("The assignment did not produce any chunks")
-        require_daily_capacity(
-            db,
-            current_user,
-            PRACTICE_GENERATION,
-            max(1, len(affected_node_ids)),
+        db.add(assignment)
+        db.flush()
+        job = models.UploadJob(
+            id=str(uuid4()),
+            user_id=current_user.id,
+            subject_id=subject_id,
+            assignment_id=assignment.id,
+            job_type="assignment",
+            status="queued",
+            stage="queued",
+            progress=0,
         )
-        generate_practice_for_assignment(db, assignment, affected_node_ids)
-        pregenerate_topic_tests_for_nodes(
-            db,
-            current_user.id,
-            affected_node_ids,
-        )
-        assignment.processing_status = "processed"
+        db.add(job)
         db.commit()
-        db.refresh(assignment)
-
-        link_rows = (
-            db.query(models.AssignmentChunkNode.chunk_id, models.AssignmentChunkNode.node_id)
-            .join(models.AssignmentChunk)
-            .filter(models.AssignmentChunk.assignment_document_id == assignment.id)
-            .all()
-        )
-        node_ids_by_chunk = {}
-        for chunk_id, node_id in link_rows:
-            node_ids_by_chunk.setdefault(chunk_id, []).append(node_id)
-
-        index_assignment_chunks(
-            user_id=current_user.id,
-            subject_id=subject_id,
-            assignment_id=assignment.id,
-            filename=assignment.filename,
-            chunks=[
-                {
-                    "id": chunk.id,
-                    "chunk_index": chunk.chunk_index,
-                    "chunk_text": chunk.chunk_text,
-                    "node_ids": node_ids_by_chunk.get(chunk.id, []),
-                }
-                for chunk in chunks
-            ],
-        )
-    except HTTPException as error:
-        _remove_failed_assignment_upload(
-            db=db,
-            user_id=current_user.id,
-            subject_id=subject_id,
-            assignment_id=assignment.id,
-            file_path=file_path,
-        )
-        raise error
-    except Exception as error:
-        _remove_failed_assignment_upload(
-            db=db,
-            user_id=current_user.id,
-            subject_id=subject_id,
-            assignment_id=assignment.id,
-            file_path=file_path,
-        )
-        raise HTTPException(status_code=422, detail=UPLOAD_RETRY_MESSAGE) from error
-
-    mapped_count = sum(chunk.mapping_status == "mapped" for chunk in chunks)
-    record_usage(db, current_user, PDF_UPLOAD)
-    record_usage(
-        db,
-        current_user,
-        PRACTICE_GENERATION,
-        max(1, len(affected_node_ids)),
-    )
-    db.commit()
-    return {
-        "id": assignment.id,
-        "subject_id": subject_id,
-        "filename": assignment.filename,
-        "processing_status": assignment.processing_status,
-        "chunk_count": len(chunks),
-        "mapped_chunk_count": mapped_count,
-        "unmapped_chunk_count": len(chunks) - mapped_count,
-        "affected_subtopic_ids": affected_node_ids,
-    }
+        db.refresh(job)
+        return job
+    except Exception:
+        db.rollback()
+        if os.path.exists(file_path):
+            os.remove(file_path)
+        raise
 
 
 @app.get(

@@ -1,4 +1,6 @@
+import os
 import unittest
+from unittest.mock import patch
 
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
@@ -7,7 +9,13 @@ from app import models
 from app.database import Base
 from app.main import get_study_node_detail, get_subject_study_tree
 from app.pdf_utils import StyledPDFLine
-from app.study_organizer import extract_outline_sections, organize_document
+from app.study_organizer import (
+    NodeSpec,
+    OrganizedSection,
+    _limit_document_subtopics,
+    extract_outline_sections,
+    organize_document,
+)
 
 
 class StudyOrganizerTests(unittest.TestCase):
@@ -41,6 +49,87 @@ class StudyOrganizerTests(unittest.TestCase):
         self.db.add(document)
         self.db.flush()
         return document
+
+    @staticmethod
+    def oversized_document_sections(count: int = 10) -> list[OrganizedSection]:
+        document_topic = NodeSpec("Deep Learning PDF", level=2)
+        section_topic = NodeSpec("Neural Networks", level=2)
+        return [
+            OrganizedSection(
+                path=[
+                    document_topic,
+                    section_topic,
+                    NodeSpec(f"Detected Section {index}", level=3),
+                ],
+                text=f"SOURCE_MARKER_{index} material for section {index}.",
+            )
+            for index in range(count)
+        ]
+
+    def test_eight_or_fewer_document_subtopics_do_not_call_ai(self):
+        sections = self.oversized_document_sections(8)
+        with patch("app.study_organizer.consolidate_subtopics") as consolidate:
+            result = _limit_document_subtopics(sections)
+
+        self.assertIs(result, sections)
+        consolidate.assert_not_called()
+
+    def test_more_than_eight_document_subtopics_use_one_ai_plan(self):
+        sections = self.oversized_document_sections(10)
+        plan = [
+            {"title": "Core Foundations", "section_indexes": [0, 1, 2]},
+            *[
+                {"title": f"Consolidated Topic {index}", "section_indexes": [index]}
+                for index in range(3, 10)
+            ],
+        ]
+        with patch(
+            "app.study_organizer.consolidate_subtopics",
+            return_value=plan,
+        ) as consolidate:
+            result = _limit_document_subtopics(sections)
+
+        self.assertEqual(8, len(result))
+        consolidate.assert_called_once()
+        self.assertEqual(8, len({section.path[-1].title for section in result}))
+        merged_text = "\n".join(section.text for section in result)
+        for index in range(10):
+            self.assertIn(f"SOURCE_MARKER_{index}", merged_text)
+
+    def test_invalid_ai_plan_still_falls_back_to_eight_subtopics(self):
+        sections = self.oversized_document_sections(11)
+        with patch(
+            "app.study_organizer.consolidate_subtopics",
+            return_value=[{"title": "Incomplete", "section_indexes": [0]}],
+        ):
+            result = _limit_document_subtopics(sections)
+
+        self.assertEqual(8, len(result))
+        merged_text = "\n".join(section.text for section in result)
+        for index in range(11):
+            self.assertIn(f"SOURCE_MARKER_{index}", merged_text)
+
+    def test_document_outline_applies_the_eight_subtopic_limit(self):
+        text = "CHAPTER 1: Fundamentals\n" + "\n".join(
+            f"1.{index + 1} Detected Topic {index}\nMaterial marker {index}."
+            for index in range(11)
+        )
+        with (
+            patch.dict(os.environ, {"SUBTOPIC_CONSOLIDATION_ENABLED": "true"}),
+            patch("app.study_organizer.consolidate_subtopics", return_value=None),
+        ):
+            sections = extract_outline_sections(
+                text,
+                "fundamentals.pdf",
+                use_llm=False,
+                document_as_topic=True,
+            )
+
+        self.assertEqual(8, len(sections))
+        self.assertEqual(8, len({_section.path[-1].title for _section in sections}))
+        merged_text = "\n".join(section.text for section in sections)
+        for index in range(11):
+            self.assertIn(f"Material marker {index}", merged_text)
 
     def test_detects_hierarchy_and_ignores_equations(self):
         text = """
@@ -134,6 +223,35 @@ Second document extends the same topic.
         self.assertEqual({"10.2.1", "10.2.2"}, {node.heading_number for node in subtopics})
         self.assertGreater(first_result.chunks_linked, 0)
         self.assertGreater(extension_result.chunks_linked, 0)
+
+    def test_document_can_be_the_top_level_topic(self):
+        document = self.add_document(
+            "cnn_fundamentals.pdf",
+            """
+CHAPTER 1: Fundamentals
+1.1 Neural Networks
+Neural networks use layers of parameters.
+1.2 Convolution
+Convolution extracts local patterns.
+1.2.1 Filters
+Filters learn useful visual features.
+""",
+        )
+        organize_document(self.db, document, use_llm=False, document_as_topic=True)
+        self.db.flush()
+
+        roots = self.db.query(models.StudyNode).filter_by(parent_id=None).all()
+        self.assertEqual(1, len(roots))
+        self.assertEqual("topic", roots[0].node_type)
+        self.assertEqual("cnn fundamentals", roots[0].normalized_title)
+
+        children = sorted(roots[0].children, key=lambda node: node.sort_order)
+        self.assertEqual({"Neural Networks", "Convolution"}, {node.title for node in children})
+        neural = next(node for node in children if node.title == "Neural Networks")
+        convolution = next(node for node in children if node.title == "Convolution")
+        self.assertEqual("subtopic", neural.node_type)
+        self.assertEqual("topic", convolution.node_type)
+        self.assertEqual(["Overview", "Filters"], [node.title for node in convolution.children])
 
     def test_numbered_sections_switch_chapters_and_word_chapters_update_titles(self):
         document = self.add_document(

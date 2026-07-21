@@ -28,9 +28,16 @@ class User(Base):
     email_verified_at = Column(DateTime(timezone=True), nullable=True)
     verification_sent_at = Column(DateTime(timezone=True), nullable=True)
     google_subject = Column(String, unique=True, index=True, nullable=True)
+    subscription_plan = Column(String, nullable=False, default="free")
     created_at = Column(DateTime(timezone=True), server_default=func.now())
 
     semesters = relationship("Semester", back_populates="user")
+    subscription = relationship(
+        "Subscription",
+        back_populates="user",
+        cascade="all, delete-orphan",
+        uselist=False,
+    )
 
 
 class LoginAttempt(Base):
@@ -104,6 +111,7 @@ class Document(Base):
     file_path = Column(String, nullable=False)
     document_type = Column(String, nullable=False)
     extracted_text = Column(Text, nullable=True)
+    processing_status = Column(String, nullable=False, default="processed")
     subject_id = Column(Integer, ForeignKey("subjects.id"), nullable=False)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
 
@@ -524,3 +532,79 @@ class Lecture(Base):
     ended_at = Column(DateTime, nullable=True)
 
     subject = relationship("Subject", back_populates="lectures")
+
+
+class UploadJob(Base):
+    __tablename__ = "upload_jobs"
+
+    id = Column(String(36), primary_key=True)
+    user_id = Column(
+        Integer,
+        ForeignKey("users.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    subject_id = Column(
+        Integer,
+        ForeignKey("subjects.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    document_id = Column(
+        Integer,
+        ForeignKey("documents.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
+    assignment_id = Column(
+        Integer,
+        ForeignKey("assignment_documents.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
+    job_type = Column(String, nullable=False)
+    status = Column(String, nullable=False, default="queued", index=True)
+    stage = Column(String, nullable=False, default="queued")
+    progress = Column(Integer, nullable=False, default=0)
+    error_message = Column(Text, nullable=True)
+    result = Column(JSON, nullable=False, default=dict)
+    attempts = Column(Integer, nullable=False, default=0)
+    created_at = Column(DateTime(timezone=True), server_default=func.now(), index=True)
+    started_at = Column(DateTime(timezone=True), nullable=True)
+    completed_at = Column(DateTime(timezone=True), nullable=True)
+    heartbeat_at = Column(DateTime(timezone=True), nullable=True, index=True)
+
+
+class Subscription(Base):
+    __tablename__ = "subscriptions"
+
+    id = Column(Integer, primary_key=True, index=True)
+    user_id = Column(
+        Integer,
+        ForeignKey("users.id", ondelete="CASCADE"),
+        nullable=False,
+        unique=True,
+        index=True,
+    )
+    provider = Column(String, nullable=False, default="stripe")
+    external_customer_id = Column(String, nullable=True, unique=True, index=True)
+    external_subscription_id = Column(String, nullable=True, unique=True, index=True)
+    price_id = Column(String, nullable=True)
+    plan = Column(String, nullable=False, default="free")
+    status = Column(String, nullable=False, default="inactive", index=True)
+    cancel_at_period_end = Column(Boolean, nullable=False, default=False)
+    current_period_end = Column(DateTime(timezone=True), nullable=True)
+    last_event_created = Column(Integer, nullable=True)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
+
+    user = relationship("User", back_populates="subscription")
+
+
+class ProcessedWebhookEvent(Base):
+    __tablename__ = "processed_webhook_events"
+
+    id = Column(String, primary_key=True)
+    provider = Column(String, nullable=False, default="stripe")
+    event_type = Column(String, nullable=False)
+    processed_at = Column(DateTime(timezone=True), server_default=func.now())

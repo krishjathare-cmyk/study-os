@@ -15,6 +15,7 @@ from app.prompts import (
     QUESTION_SET_SYSTEM_PROMPT,
     RAG_ANSWER_SYSTEM_PROMPT,
     STUDY_PATH_SYSTEM_PROMPT,
+    SUBTOPIC_CONSOLIDATION_SYSTEM_PROMPT,
     VISUALIZATION_SYSTEM_PROMPT,
 )
 from app.retrieval_utils import tokenize
@@ -542,6 +543,95 @@ Material sample:
     if not all(path):
         return None
     return path
+
+
+def consolidate_subtopics(
+    candidates: list[dict],
+    max_subtopics: int = 8,
+) -> list[dict] | None:
+    """Ask the outline model for one bounded consolidation plan.
+
+    This is deliberately optional. The organizer validates the returned plan
+    and has a deterministic fallback, so an unavailable provider can never
+    prevent a PDF from being organized.
+    """
+    if len(candidates) <= max_subtopics:
+        return None
+
+    client = _get_openai_client()
+    if not _remote_llm_enabled() or client is None:
+        return None
+
+    compact_candidates = [
+        {
+            "index": index,
+            "path": str(candidate.get("path") or "")[:500],
+            "excerpt": str(candidate.get("excerpt") or "")[:900],
+        }
+        for index, candidate in enumerate(candidates)
+    ]
+    prompt = f"""
+Consolidate these {len(compact_candidates)} detected sections into exactly
+{max_subtopics} learning topics. Every section index from 0 through
+{len(compact_candidates) - 1} must appear exactly once across section_indexes.
+
+Detected sections (JSON):
+{json.dumps(compact_candidates, ensure_ascii=False)}
+"""
+    try:
+        timeout_seconds = float(os.getenv("OUTLINE_TIMEOUT_SECONDS", "90"))
+    except ValueError:
+        timeout_seconds = 90.0
+    timeout_seconds = min(180.0, max(15.0, timeout_seconds))
+
+    try:
+        response = client.chat.completions.create(
+            model=_model_for("OUTLINE_MODEL", "gpt-5.4-nano"),
+            messages=[
+                {
+                    "role": "system",
+                    "content": SUBTOPIC_CONSOLIDATION_SYSTEM_PROMPT,
+                },
+                {"role": "user", "content": prompt},
+            ],
+            response_format={
+                "type": "json_schema",
+                "json_schema": {
+                    "name": "subtopic_consolidation",
+                    "strict": True,
+                    "schema": {
+                        "type": "object",
+                        "properties": {
+                            "groups": {
+                                "type": "array",
+                                "minItems": max_subtopics,
+                                "maxItems": max_subtopics,
+                                "items": {
+                                    "type": "object",
+                                    "properties": {
+                                        "title": {"type": "string"},
+                                        "section_indexes": {
+                                            "type": "array",
+                                            "items": {"type": "integer"},
+                                        },
+                                    },
+                                    "required": ["title", "section_indexes"],
+                                    "additionalProperties": False,
+                                },
+                            },
+                        },
+                        "required": ["groups"],
+                        "additionalProperties": False,
+                    },
+                },
+            },
+            timeout=timeout_seconds,
+        )
+        result = json.loads(response.choices[0].message.content or "{}")
+        groups = result.get("groups")
+        return groups if isinstance(groups, list) else None
+    except (OpenAIError, json.JSONDecodeError, TypeError, KeyError, ValueError):
+        return None
 
 
 def map_assignment_chunks(

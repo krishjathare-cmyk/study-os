@@ -174,7 +174,7 @@ class SecurityTests(unittest.TestCase):
 
         summary = usage_summary(self.db, user)
 
-        self.assertEqual("student", summary["plan"])
+        self.assertEqual("free", summary["plan"])
         self.assertEqual(2, summary["used"]["ai_messages_daily"])
         self.assertEqual(28, summary["remaining"]["ai_messages_daily"])
         self.assertEqual(3, summary["limits"]["pdfs_total"])

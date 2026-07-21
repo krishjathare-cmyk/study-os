@@ -3,6 +3,7 @@
 .env.*
 !.env.example
 !.env.sample
+!.env.production.example
 
 # Python virtual environments
 .venv/
