@@ -38,6 +38,7 @@ vectordb/
 node_modules/
 frontend/node_modules/
 frontend/dist/
+frontend/dist-check/
 frontend/build/
 frontend/.vite/
 npm-debug.log*
@@ -57,3 +58,9 @@ pnpm-debug.log*
 .DS_Store
 Thumbs.db
 Desktop.ini
+
+# Local agent settings and downloaded transcription models
+.agents/
+.codex/
+whisper-models/
+backend/whisper-models/
