@@ -1,0 +1,30 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="440" viewBox="0 0 1200 440" role="img" aria-labelledby="title desc">
+  <title id="title">Study OS learning workflow</title>
+  <desc id="desc">Feature illustration: upload PDFs, explore a concept map, learn with notes and questions, then practice and revise. This is not an application screenshot.</desc>
+  <rect width="1200" height="440" rx="24" fill="#f5f2e9"/>
+  <g font-family="Arial, sans-serif">
+    <text x="52" y="65" font-size="22" font-weight="700" fill="#305b4b">study / os</text>
+    <text x="52" y="121" font-size="38" font-weight="700" fill="#25362f">Make the whole subject navigable.</text>
+    <text x="52" y="158" font-size="18" fill="#59685f">From source material to a clearer daily learning routine.</text>
+    <path d="M280 274H333 M560 274H613 M840 274H893" stroke="#739382" stroke-width="3"/>
+    <g fill="#fffdf8" stroke="#d7ded1" stroke-width="2">
+      <rect x="52" y="207" width="228" height="140" rx="18"/>
+      <rect x="332" y="207" width="228" height="140" rx="18"/>
+      <rect x="612" y="207" width="228" height="140" rx="18"/>
+      <rect x="892" y="207" width="256" height="140" rx="18"/>
+    </g>
+    <g fill="#305b4b" font-size="14" font-weight="700">
+      <text x="74" y="239">01 / UPLOAD</text><text x="354" y="239">02 / EXPLORE</text>
+      <text x="634" y="239">03 / UNDERSTAND</text><text x="914" y="239">04 / REMEMBER</text>
+    </g>
+    <g fill="#25362f" font-size="23" font-weight="700">
+      <text x="74" y="278">Your PDFs</text><text x="354" y="278">Study maps</text>
+      <text x="634" y="278">Notes + chat</text><text x="914" y="278">Practice + revision</text>
+    </g>
+    <g fill="#59685f" font-size="15">
+      <text x="74" y="312">Textbooks and assignments</text><text x="354" y="312">Topics and subtopics</text>
+      <text x="634" y="312">Grounded in your sources</text><text x="914" y="312">Questions and progress</text>
+    </g>
+    <text x="52" y="396" font-size="14" fill="#68756c">FEATURE ILLUSTRATION · React / FastAPI / Chroma Cloud / Whisper</text>
+  </g>
+</svg>

@@ -1,0 +1,32 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="480" viewBox="0 0 1200 480" role="img" aria-labelledby="title desc">
+  <title id="title">Study OS architecture</title>
+  <desc id="desc">React connects to FastAPI. The API and PDF worker share a relational database and file storage. Backend services use Chroma Cloud, language models, and Whisper.</desc>
+  <rect width="1200" height="480" rx="24" fill="#142d26"/>
+  <g font-family="Arial, sans-serif">
+    <text x="48" y="58" font-size="27" font-weight="700" fill="#f4f1e5">One workspace. A dedicated processing pipeline.</text>
+    <g stroke="#87b9a0" stroke-width="2" fill="none">
+      <path d="M290 203H370 M610 203H690 M490 253V340H290 M810 253V340H290 M490 340H930V253 M610 203H650V420H930"/>
+    </g>
+    <g fill="#23483b" stroke="#547762">
+      <rect x="50" y="153" width="240" height="100" rx="15"/>
+      <rect x="370" y="153" width="240" height="100" rx="15"/>
+      <rect x="690" y="153" width="240" height="100" rx="15"/>
+      <rect x="50" y="303" width="240" height="85" rx="15"/>
+      <rect x="370" y="378" width="240" height="74" rx="15"/>
+      <rect x="930" y="303" width="220" height="85" rx="15"/>
+      <rect x="930" y="398" width="220" height="54" rx="15"/>
+    </g>
+    <g fill="#f4f1e5" font-size="22" font-weight="700" text-anchor="middle">
+      <text x="170" y="194">React frontend</text><text x="490" y="194">FastAPI</text>
+      <text x="810" y="194">PDF worker</text><text x="170" y="338">Shared database</text>
+      <text x="490" y="409">Shared files</text><text x="1040" y="338">Chroma Cloud</text>
+      <text x="1040" y="432" font-size="17">AI models + Whisper</text>
+    </g>
+    <g fill="#bcd2c2" font-size="14" text-anchor="middle">
+      <text x="170" y="222">Vite / Nginx</text><text x="490" y="222">Accounts / study / billing</text>
+      <text x="810" y="222">Durable background jobs</text><text x="170" y="364">SQLite locally / PostgreSQL in production</text>
+      <text x="490" y="433">Uploads and model cache</text><text x="1040" y="364">Vector indexing and retrieval</text>
+    </g>
+    <text x="50" y="105" font-size="15" fill="#bcd2c2">ARCHITECTURE ILLUSTRATION · API and worker share persistent application data.</text>
+  </g>
+</svg>
